@@ -496,10 +496,12 @@ function InboxMessageDetailPane({
       },
       agentPubkeys,
       profiles,
+      currentPubkey,
     );
   }, [
     agentPubkeys,
     capturedDefaultParentId,
+    currentPubkey,
     displayMessages,
     isDirectMessage,
     item,
