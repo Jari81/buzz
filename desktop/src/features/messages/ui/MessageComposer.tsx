@@ -54,12 +54,13 @@ import { ComposerUploadProgressPill } from "./ComposerUploadProgressPill";
 import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
 import { useMentionSendFlow } from "./useMentionSendFlow";
 import { usePersistentAgentMentionHydration } from "./usePersistentAgentMentionHydration";
+import { useReplyTargetAgentMention } from "./useReplyTargetAgentMention";
+import { useComposerAutoSubmit } from "./useComposerAutoSubmit";
 import { useComposerContentState } from "./useComposerContentState";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
 import { submitMessageEdit } from "./submitMessageEdit";
 import { prepareBackgroundLinkPreviews } from "@/features/messages/lib/linkPreviewPreparationStore";
 import { useComposerLinkPreviews } from "./useComposerLinkPreviews";
-import { scheduleSettleGatedAutoSubmit } from "./messageComposerAutoSubmit";
 import type { MessageComposerProps } from "./MessageComposer.types";
 function MessageComposerImpl({
   audienceContext = null,
@@ -86,6 +87,7 @@ function MessageComposerImpl({
   placeholder,
   profiles,
   replyTarget = null,
+  replyTargetAgent = null,
   mediaController,
   showBackgroundUploadProgress = true,
   showTopBorder = false,
@@ -167,7 +169,21 @@ function MessageComposerImpl({
     effectiveDraftKey,
     channelId,
     loadDraft: drafts.loadDraft,
-    persistDraft: drafts.persistDraft,
+    // An untouched auto-inserted reply-target mention is not an authored
+    // draft — persist it as empty (which clears the entry) so navigating
+    // away from an agent thread never strands a phantom "@Agent " draft.
+    persistDraft: (draftKey, content, draftChannelId, imeta, spoilered, refs) =>
+      drafts.persistDraft(
+        draftKey,
+        imeta.length === 0 &&
+          replyAgentMentionRef.current?.isUntouchedAutoMention()
+          ? ""
+          : content,
+        draftChannelId,
+        imeta,
+        spoilered,
+        refs,
+      ),
     getMentionRefs: mentions.getDraftMentionRefs,
     restoreMentionRefs: mentions.restoreDraftMentionRefs,
     livePendingImeta: media.pendingImeta,
@@ -273,6 +289,7 @@ function MessageComposerImpl({
       channelLinks.updateChannelQuery(text, cursor);
       emojiAutocomplete.updateEmojiQuery(text, cursor);
       persistentMentionHydrationRef.current?.reconcile(text);
+      replyAgentMentionRef.current?.reconcile(text);
       if (text.trim().length > 0) {
         notifyTyping();
       }
@@ -301,6 +318,15 @@ function MessageComposerImpl({
     persistentMentionHydration,
   );
   persistentMentionHydrationRef.current = persistentMentionHydration;
+
+  const replyAgentMention = useReplyTargetAgentMention({
+    isEditing: editTarget != null,
+    mentions,
+    richText,
+    target: replyTargetAgent,
+  });
+  const replyAgentMentionRef = React.useRef(replyAgentMention);
+  replyAgentMentionRef.current = replyAgentMention;
   const mentionSendFlow = useMentionSendFlow({
     channelId,
     channelLinks,
@@ -581,6 +607,7 @@ function MessageComposerImpl({
     isSubmitLockedRef.current = true;
     onPreparingMentionSendChange?.(true);
     persistentMentionHydration.beginSubmit();
+    replyAgentMention.beginSubmit();
     try {
       const preparedLinkPreviews = getReadyLinkPreviewTags().some(
         (tag) => tag[1] === "none",
@@ -607,6 +634,7 @@ function MessageComposerImpl({
     } finally {
       isSubmitLockedRef.current = false;
       persistentMentionHydration.endSubmit();
+      replyAgentMention.endSubmit();
       onPreparingMentionSendChange?.(false);
     }
   }, [
@@ -635,6 +663,7 @@ function MessageComposerImpl({
     onPreparingMentionSendChange,
     audienceScope,
     persistentMentionHydration,
+    replyAgentMention,
     persistentAudience.generation,
     persistentAudience.revision,
     isEditSubmissionLocked,
@@ -644,25 +673,13 @@ function MessageComposerImpl({
     mentions.revalidateMentionPubkeys,
   ]);
   submitMessageRef.current = submitMessage;
-  // Draft auto-submit runs once after persisted editor state loads.
-  const onAutoSubmitCompleteRef = React.useRef(onAutoSubmitComplete);
-  onAutoSubmitCompleteRef.current = onAutoSubmitComplete;
-  // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally fires once on mount only
-  React.useEffect(() => {
-    if (
-      autoSubmitDraftKey === null ||
-      autoSubmitDraftKey !== effectiveDraftKey
-    ) {
-      return;
-    }
-    // Clear the trigger BEFORE firing so any navigation from the send cannot
-    // loop back with the param still present.
-    onAutoSubmitCompleteRef.current?.();
-    return scheduleSettleGatedAutoSubmit({
-      submit: () => submitMessageRef.current(),
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // mount-only
+
+  useComposerAutoSubmit({
+    autoSubmitDraftKey,
+    effectiveDraftKey,
+    onAutoSubmitComplete,
+    submitMessageRef,
+  });
   const handleSubmit = React.useCallback(
     (event: React.FormEvent<HTMLFormElement>) => {
       event.preventDefault();

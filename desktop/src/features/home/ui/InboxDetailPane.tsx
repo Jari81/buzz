@@ -42,6 +42,7 @@ import {
   buildVideoReviewPresentationByMessageId,
   hasRenderedVideoAttachment,
 } from "@/features/messages/lib/videoReviewContext";
+import { resolveReplyTargetAgent } from "@/features/messages/lib/replyTargetAgentMention";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
@@ -462,6 +463,50 @@ function InboxMessageDetailPane({
     conversationId,
   );
 
+  // Auto-mention the agent whose message is being replied to. The effective
+  // target mirrors `composerParentEventId` below: the explicit sub-message
+  // reply target, else the captured default parent. DMs already p-tag every
+  // participant, so they never need the chip.
+  const replyTargetAgent = React.useMemo(() => {
+    if (!item || isDirectMessage) {
+      return null;
+    }
+    const explicitTarget =
+      displayMessages.find((message) => message.id === replyTargetId) ?? null;
+    const targetId = explicitTarget?.id ?? capturedDefaultParentId ?? item.id;
+    const targetMessage =
+      displayMessages.find((message) => message.id === targetId) ??
+      (targetId === item.id
+        ? {
+            authorLabel: item.senderLabel,
+            authorPubkey: item.item.pubkey,
+            id: item.id,
+            isAgent: undefined,
+          }
+        : null);
+    if (!targetMessage) {
+      return null;
+    }
+    return resolveReplyTargetAgent(
+      {
+        author: targetMessage.authorLabel,
+        id: targetMessage.id,
+        isAgent: targetMessage.isAgent,
+        pubkey: targetMessage.authorPubkey,
+      },
+      agentPubkeys,
+      profiles,
+    );
+  }, [
+    agentPubkeys,
+    capturedDefaultParentId,
+    displayMessages,
+    isDirectMessage,
+    item,
+    profiles,
+    replyTargetId,
+  ]);
+
   if (!item) {
     return (
       <section
@@ -858,6 +903,7 @@ function InboxMessageDetailPane({
                     "Replies are not available for this item.")
               }
               replyTarget={composerReplyTarget}
+              replyTargetAgent={replyTargetAgent}
             />
           </div>
         </div>
