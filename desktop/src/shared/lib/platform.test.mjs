@@ -3,32 +3,36 @@ import test from "node:test";
 
 import { isWindowsPlatform } from "./platform.ts";
 
-function withNavigatorPlatform(platform, callback) {
-  const originalNavigator = Object.getOwnPropertyDescriptor(
-    globalThis,
-    "navigator",
-  );
+function withNavigator(navigator, callback) {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "navigator");
   Object.defineProperty(globalThis, "navigator", {
     configurable: true,
-    value: { platform, userAgent: "" },
+    value: navigator,
   });
 
   try {
     callback();
   } finally {
-    if (originalNavigator) {
-      Object.defineProperty(globalThis, "navigator", originalNavigator);
+    if (original) {
+      Object.defineProperty(globalThis, "navigator", original);
     } else {
       delete globalThis.navigator;
     }
   }
 }
 
-test("Windows platform detection accepts Win32 without matching Darwin", () => {
-  withNavigatorPlatform("Win32", () => {
-    assert.equal(isWindowsPlatform(), true);
-  });
-  withNavigatorPlatform("Darwin", () => {
-    assert.equal(isWindowsPlatform(), false);
-  });
+test("Windows detection accepts the platform strings WebView2 reports", () => {
+  for (const platform of ["Win32", "Win64", "Windows"]) {
+    withNavigator({ platform, userAgent: "" }, () => {
+      assert.equal(isWindowsPlatform(), true, platform);
+    });
+  }
+});
+
+test("Windows detection rejects the other desktop platforms", () => {
+  for (const platform of ["MacIntel", "Darwin", "Linux x86_64"]) {
+    withNavigator({ platform, userAgent: "" }, () => {
+      assert.equal(isWindowsPlatform(), false, platform);
+    });
+  }
 });
