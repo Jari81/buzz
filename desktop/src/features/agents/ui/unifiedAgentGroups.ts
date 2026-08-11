@@ -1,3 +1,4 @@
+import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
 
 type PersonaGroup = { persona: AgentPersona; agents: ManagedAgent[] };
@@ -31,4 +32,15 @@ export function buildUnifiedGroups(
   }
 
   return { groups, ungrouped, unknown };
+}
+
+export function profileAgentsForGroup(agents: ManagedAgent[]) {
+  return [...agents].sort((left, right) => {
+    const activeDiff =
+      Number(isManagedAgentActive(right)) - Number(isManagedAgentActive(left));
+    if (activeDiff !== 0) return activeDiff;
+    const nameDiff = left.name.localeCompare(right.name);
+    if (nameDiff !== 0) return nameDiff;
+    return left.pubkey.localeCompare(right.pubkey);
+  });
 }

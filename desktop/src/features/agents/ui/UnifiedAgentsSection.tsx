@@ -8,18 +8,21 @@ import {
 import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModelLabel";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
-import { pickProfileAgent } from "@/features/agents/lib/pickProfileAgent";
 import { useUserProfileQuery } from "@/features/profile/hooks";
 import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
 import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelContext";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
+import { truncatePubkey } from "@/shared/lib/pubkey";
 import { Badge } from "@/shared/ui/badge";
 import { IdentityCardSkeleton } from "@/shared/ui/identity-card-skeleton";
 import { AgentIdentityCard } from "./AgentIdentityCard";
 import { AgentRuntimeAvatarControl } from "./AgentRuntimeAvatarControl";
 import { CreateIdentityCard } from "./CreateIdentityCard";
 import { PersonaActionsMenu } from "./PersonaActionsMenu";
-import { buildUnifiedGroups } from "./unifiedAgentGroups";
+import {
+  buildUnifiedGroups,
+  profileAgentsForGroup,
+} from "./unifiedAgentGroups";
 
 type UnifiedAgentsSectionProps = {
   defaultModel: string;
@@ -128,41 +131,96 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               disabled={isPersonasPending}
               onClick={onOpenCatalog}
             />
-            {groups.map((group) => {
-              const profileAgent = pickProfileAgent(group.agents);
-              return (
-                <AgentPersonaCard
-                  actions={(effectiveAvatarUrl, isEffectiveAvatarLoading) => (
-                    <PersonaActionsMenu
-                      isActionPending={
-                        isActionPending || isEffectiveAvatarLoading
-                      }
-                      isPending={isPersonasPending}
-                      persona={group.persona}
-                      linkedAgent={profileAgent}
-                      onDeactivate={onDeactivatePersona}
-                      onDelete={onDeletePersona}
-                      onDuplicate={onDuplicatePersona}
-                      onEdit={onEditPersona}
-                      onShare={(persona, linkedAgent) =>
-                        onSharePersona(persona, linkedAgent, effectiveAvatarUrl)
-                      }
-                    />
-                  )}
-                  agent={profileAgent}
-                  defaultModel={defaultModel}
-                  key={group.persona.id}
-                  persona={group.persona}
-                  restartingAgentPubkey={restartingAgentPubkey}
-                  startingAgentPubkey={startingAgentPubkey}
-                  startingPersonaIds={startingPersonaIds}
-                  onOpenAgentProfile={onOpenAgentProfile}
-                  onOpenPersonaProfile={onOpenPersonaProfile}
-                  onRestartAgent={onRestartAgent}
-                  onStartAgent={onStartAgent}
-                  onStartPersona={onStartPersona}
-                />
-              );
+            {groups.flatMap((group) => {
+              const profileAgents = profileAgentsForGroup(group.agents);
+              const cards: Array<React.ReactElement> = [];
+
+              if (profileAgents.length === 0) {
+                cards.push(
+                  <AgentPersonaCard
+                    actions={(effectiveAvatarUrl, isEffectiveAvatarLoading) => (
+                      <PersonaActionsMenu
+                        isActionPending={
+                          isActionPending || isEffectiveAvatarLoading
+                        }
+                        isPending={isPersonasPending}
+                        persona={group.persona}
+                        linkedAgent={undefined}
+                        onDeactivate={onDeactivatePersona}
+                        onDelete={onDeletePersona}
+                        onDuplicate={onDuplicatePersona}
+                        onEdit={onEditPersona}
+                        onShare={(persona, linkedAgent) =>
+                          onSharePersona(
+                            persona,
+                            linkedAgent,
+                            effectiveAvatarUrl,
+                          )
+                        }
+                      />
+                    )}
+                    agent={undefined}
+                    defaultModel={defaultModel}
+                    key={`persona:${group.persona.id}`}
+                    persona={group.persona}
+                    restartingAgentPubkey={restartingAgentPubkey}
+                    startingAgentPubkey={startingAgentPubkey}
+                    startingPersonaIds={startingPersonaIds}
+                    onOpenAgentProfile={onOpenAgentProfile}
+                    onOpenPersonaProfile={onOpenPersonaProfile}
+                    onRestartAgent={onRestartAgent}
+                    onStartAgent={onStartAgent}
+                    onStartPersona={onStartPersona}
+                  />,
+                );
+                return cards;
+              }
+
+              for (const [index, profileAgent] of profileAgents.entries()) {
+                cards.push(
+                  <AgentPersonaCard
+                    actions={
+                      index === 0
+                        ? (effectiveAvatarUrl, isEffectiveAvatarLoading) => (
+                            <PersonaActionsMenu
+                              isActionPending={
+                                isActionPending || isEffectiveAvatarLoading
+                              }
+                              isPending={isPersonasPending}
+                              persona={group.persona}
+                              linkedAgent={profileAgent}
+                              onDeactivate={onDeactivatePersona}
+                              onDelete={onDeletePersona}
+                              onDuplicate={onDuplicatePersona}
+                              onEdit={onEditPersona}
+                              onShare={(persona, linkedAgent) =>
+                                onSharePersona(
+                                  persona,
+                                  linkedAgent,
+                                  effectiveAvatarUrl,
+                                )
+                              }
+                            />
+                          )
+                        : undefined
+                    }
+                    agent={profileAgent}
+                    defaultModel={defaultModel}
+                    key={`agent:${profileAgent.pubkey}`}
+                    persona={group.persona}
+                    restartingAgentPubkey={restartingAgentPubkey}
+                    startingAgentPubkey={startingAgentPubkey}
+                    startingPersonaIds={startingPersonaIds}
+                    onOpenAgentProfile={onOpenAgentProfile}
+                    onOpenPersonaProfile={onOpenPersonaProfile}
+                    onRestartAgent={onRestartAgent}
+                    onStartAgent={onStartAgent}
+                    onStartPersona={onStartPersona}
+                  />,
+                );
+              }
+
+              return cards;
             })}
           </div>
 
@@ -309,6 +367,7 @@ function AgentPersonaCard({
       }
       avatarUrl={avatarUrl}
       dataTestId={`persona-agent-row-${persona.id}`}
+      identityLabel={agent ? truncatePubkey(agent.pubkey) : null}
       label={title}
       modelLabel={modelLabel}
       onClick={() => {
