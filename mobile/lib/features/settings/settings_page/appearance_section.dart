@@ -1,6 +1,6 @@
 part of '../settings_page.dart';
 
-/// System / Light / Dark, mirroring desktop's appearance-mode selector.
+/// System / Light / Dark, mirroring desktop's color-mode selector.
 const _modeOptions = <({ThemeMode mode, String label, IconData icon})>[
   (mode: ThemeMode.system, label: 'System', icon: LucideIcons.sunMoon),
   (mode: ThemeMode.light, label: 'Light', icon: LucideIcons.sun),
@@ -24,18 +24,18 @@ class _AppearanceSection extends ConsumerWidget {
     );
 
     return AppListCard(
-      label: 'Style · This community',
+      label: 'Theme · This community',
       children: [
         AppListRow(
           icon: LucideIcons.sunMoon,
-          title: 'Appearance',
+          title: 'Color mode',
           value: _modeLabel(mode),
           trailing: const _RowChevron(),
           onTap: () => _showAppearanceModeSheet(context),
         ),
         AppListRow(
           icon: LucideIcons.palette,
-          title: 'Theme',
+          title: 'Color style',
           value: themeSelectionLabel(schemeName, mode),
           trailing: const _RowChevron(),
           onTap: () => Navigator.of(context).push(
@@ -87,7 +87,7 @@ class _AppearanceModeSheet extends ConsumerWidget {
               Grid.gutter,
               Grid.xxs,
             ),
-            child: Text('Appearance', style: context.textTheme.titleMedium),
+            child: Text('Color mode', style: context.textTheme.titleMedium),
           ),
           for (final option in _modeOptions)
             AppListRow(
