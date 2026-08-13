@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   Archive,
@@ -438,13 +438,7 @@ function ThemeSettingsCard() {
       ? "light"
       : "dark";
 
-  const [selectedMode, setSelectedMode] = useState<AppearanceMode>(activeMode);
   const [themeStyleExpanded, setThemeStyleExpanded] = useState(false);
-
-  // Community sync can replace the appearance while this panel remains open.
-  // Mirror that external value so the segmented control never describes the
-  // previous community's color mode.
-  useEffect(() => setSelectedMode(activeMode), [activeMode]);
 
   const getVars = (name: SyntaxThemeName) =>
     withAccentPreviewVars(
@@ -467,7 +461,6 @@ function ThemeSettingsCard() {
   }, [pairedLight, darkOnly]);
 
   const handleModeSelect = (mode: AppearanceMode) => {
-    setSelectedMode(mode);
     if (mode === "system") {
       setFollowSystem(true);
       // If the current theme is unpaired, resolveSystemTheme can't switch it
@@ -505,7 +498,7 @@ function ThemeSettingsCard() {
 
   const handleSelectTheme = (name: SyntaxThemeName) => {
     setTheme(name);
-    if (selectedMode === "system") {
+    if (activeMode === "system") {
       setFollowSystem(true);
     } else {
       setFollowSystem(false);
@@ -518,7 +511,7 @@ function ThemeSettingsCard() {
     return selectedThemeName === lightName || selectedThemeName === darkName;
   };
   const selectedPairedTheme =
-    selectedMode === "system" ? pairedLight.find(isPairActive) : undefined;
+    activeMode === "system" ? pairedLight.find(isPairActive) : undefined;
   const selectedTheme = selectedThemeName as SyntaxThemeName;
   const selectedPairedDarkTheme = selectedPairedTheme
     ? getThemePair(selectedPairedTheme)
@@ -579,7 +572,7 @@ function ThemeSettingsCard() {
         ) : null}
         <div className="max-h-[430px] overflow-y-auto rounded-lg pt-2">
           <div className="flex flex-wrap gap-4 p-1">
-            {selectedMode === "system" &&
+            {activeMode === "system" &&
               pairedLight.map((lightName) => {
                 const darkName = getThemePair(lightName);
                 if (!darkName) return null;
@@ -594,7 +587,7 @@ function ThemeSettingsCard() {
                   />
                 );
               })}
-            {selectedMode === "light" &&
+            {activeMode === "light" &&
               allLightThemes.map((name) => (
                 <SingleThemeTile
                   isActive={selectedThemeName === name}
@@ -604,7 +597,7 @@ function ThemeSettingsCard() {
                   vars={getVars(name)}
                 />
               ))}
-            {selectedMode === "dark" &&
+            {activeMode === "dark" &&
               allDarkThemes.map((name) => (
                 <SingleThemeTile
                   isActive={selectedThemeName === name}
@@ -656,16 +649,16 @@ function ThemeSettingsCard() {
                 className="absolute bottom-0.5 left-0.5 top-0.5 z-0 rounded-md bg-background shadow-sm transition-transform duration-[250ms] ease-out motion-reduce:transition-none"
                 data-testid="appearance-color-mode-indicator"
                 style={{
-                  transform: `translateX(${APPEARANCE_MODE_OPTIONS.findIndex((option) => option.mode === selectedMode) * 100}%)`,
+                  transform: `translateX(${APPEARANCE_MODE_OPTIONS.findIndex((option) => option.mode === activeMode) * 100}%)`,
                   width: "calc((100% - 4px) / 3)",
                 }}
               />
               {APPEARANCE_MODE_OPTIONS.map(({ mode, label, Icon }) => (
                 <button
-                  aria-pressed={selectedMode === mode}
+                  aria-pressed={activeMode === mode}
                   className={cn(
                     "relative z-10 flex h-full items-center justify-center gap-1.5 rounded-md bg-transparent px-2.5 text-xs font-medium transition-colors duration-[250ms] ease-out focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none",
-                    selectedMode === mode
+                    activeMode === mode
                       ? "text-foreground"
                       : "text-muted-foreground hover:text-foreground",
                   )}
