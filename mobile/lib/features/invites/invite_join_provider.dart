@@ -21,6 +21,20 @@ final inviteKeyGeneratorProvider = Provider<InviteKeyGenerator>((ref) {
 
 typedef InviteKeyGenerator = nostr.Keys Function();
 
+const _unset = Object();
+
+/// Recovers the required channel state after an invite membership claim.
+abstract interface class InviteJoinRecovery {
+  /// Reuses or creates the active identity's private Welcome channel.
+  Future<void> ensureWelcomeChannel();
+}
+
+final inviteJoinRecoveryProvider = Provider<InviteJoinRecovery>((ref) {
+  throw StateError(
+    'inviteJoinRecoveryProvider must be configured by the app root',
+  );
+});
+
 enum InviteJoinStatus {
   idle,
   confirming,
@@ -37,6 +51,7 @@ class InviteJoinState {
   final String? communityName;
   final String? errorMessage;
   final bool requiresFreshInvite;
+  final bool claimCompleted;
 
   const InviteJoinState({
     this.status = InviteJoinStatus.idle,
@@ -45,6 +60,7 @@ class InviteJoinState {
     this.communityName,
     this.errorMessage,
     this.requiresFreshInvite = false,
+    this.claimCompleted = false,
   });
 
   InviteJoinState copyWith({
@@ -52,15 +68,19 @@ class InviteJoinState {
     InviteDeepLink? invite,
     String? host,
     String? communityName,
-    String? errorMessage,
+    Object? errorMessage = _unset,
     bool? requiresFreshInvite,
+    bool? claimCompleted,
   }) => InviteJoinState(
     status: status ?? this.status,
     invite: invite ?? this.invite,
     host: host ?? this.host,
     communityName: communityName ?? this.communityName,
-    errorMessage: errorMessage ?? this.errorMessage,
+    errorMessage: identical(errorMessage, _unset)
+        ? this.errorMessage
+        : errorMessage as String?,
     requiresFreshInvite: requiresFreshInvite ?? this.requiresFreshInvite,
+    claimCompleted: claimCompleted ?? this.claimCompleted,
   );
 }
 
@@ -102,8 +122,18 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
       return;
     }
 
-    state = state.copyWith(status: InviteJoinStatus.claiming);
+    final resumingRecovery = state.claimCompleted;
+    state = state.copyWith(
+      status: InviteJoinStatus.claiming,
+      errorMessage: null,
+    );
     try {
+      if (resumingRecovery) {
+        await ref.read(inviteJoinRecoveryProvider).ensureWelcomeChannel();
+        state = state.copyWith(status: InviteJoinStatus.success);
+        return;
+      }
+
       final communities = await ref.read(communityListProvider.future);
       final existing = _existingCommunity(communities, invite.relayUrl);
       if (existing != null) {
@@ -164,14 +194,24 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
           .read(authProvider.notifier)
           .authenticateWithCommunity(community);
       state = state.copyWith(
+        claimCompleted: true,
+        communityName: community.name,
+      );
+      await ref.read(inviteJoinRecoveryProvider).ensureWelcomeChannel();
+      state = state.copyWith(
         status: InviteJoinStatus.success,
         communityName: community.name,
       );
     } catch (error) {
-      final requiresFreshInvite = _requiresFreshInvite(error);
+      final claimCompleted = state.claimCompleted;
+      final requiresFreshInvite = claimCompleted
+          ? false
+          : _requiresFreshInvite(error);
       state = state.copyWith(
         status: InviteJoinStatus.error,
-        errorMessage: _friendlyInviteError(error),
+        errorMessage: claimCompleted
+            ? _friendlyRecoveryError(error)
+            : _friendlyInviteError(error),
         requiresFreshInvite: requiresFreshInvite,
       );
     }
@@ -283,4 +323,9 @@ String _friendlyInviteError(Object error) {
     return 'Could not reach the relay. Check your connection and try again.';
   }
   return 'Could not join this community: $message';
+}
+
+String _friendlyRecoveryError(Object error) {
+  final message = error.toString().replaceFirst('Exception: ', '');
+  return 'You joined this community, but Buzz could not set up your Welcome channel: $message. Try again.';
 }

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:app_badge_plus/app_badge_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -7,9 +9,13 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'features/activity/activity_provider.dart';
 import 'features/activity/inbox_local_state_provider.dart';
 import 'features/activity/inbox_read_state.dart';
+import 'features/channels/channel.dart';
+import 'features/channels/channel_management_provider.dart';
+import 'features/channels/channels_provider.dart';
 import 'features/channels/unread_badge/unread_badge_provider.dart';
 import 'features/home/home_page.dart';
 import 'features/invites/invite_create_page.dart';
+import 'features/invites/invite_join_provider.dart';
 import 'features/pairing/pairing_page.dart';
 import 'features/channels/agent_activity/observer_subscription.dart';
 import 'features/channels/deep_link_dispatcher.dart';
@@ -23,6 +29,114 @@ import 'shared/relay/relay.dart';
 import 'shared/read_state/read_state_provider.dart';
 import 'shared/theme/theme.dart';
 import 'shared/widgets/buzz_loading_indicator.dart';
+
+const _welcomeChannelName = 'Welcome';
+const _welcomeChannelDescription =
+    'A private channel for getting oriented in this community.';
+
+final _inviteRelayConnectedProvider = FutureProvider.family<void, String>((
+  ref,
+  expectedRelayUrl,
+) async {
+  final currentConfig = ref.read(relayConfigProvider);
+  if (currentConfig.baseUrl != expectedRelayUrl) {
+    throw StateError('Active community changed before invite recovery');
+  }
+  if (ref.read(relaySessionProvider).status == SessionStatus.connected) return;
+
+  final connected = Completer<void>();
+  ref.listen(relaySessionProvider, (_, next) {
+    if (connected.isCompleted) return;
+    if (ref.read(relayConfigProvider).baseUrl != expectedRelayUrl) {
+      connected.completeError(
+        StateError('Active community changed during invite recovery'),
+      );
+    } else if (next.status == SessionStatus.connected) {
+      connected.complete();
+    }
+  });
+  await connected.future;
+});
+
+/// App-level bridge from invite joining to the channels feature.
+class MobileInviteJoinRecovery implements InviteJoinRecovery {
+  final Future<List<Channel>> Function() _loadChannels;
+  final Future<Channel> Function({
+    required String name,
+    required String channelType,
+    required String visibility,
+    String? description,
+    int? ttlSeconds,
+  })
+  _createChannel;
+
+  /// Creates recovery from channel-loading and channel-creation operations.
+  const MobileInviteJoinRecovery({
+    required Future<List<Channel>> Function() loadChannels,
+    required Future<Channel> Function({
+      required String name,
+      required String channelType,
+      required String visibility,
+      String? description,
+      int? ttlSeconds,
+    })
+    createChannel,
+  }) : _loadChannels = loadChannels,
+       _createChannel = createChannel;
+
+  /// Reuses the current private Welcome channel or creates it when missing.
+  @override
+  Future<void> ensureWelcomeChannel() async {
+    final channels = await _loadChannels();
+    final hasWelcomeChannel = channels.any(
+      (channel) =>
+          channel.name == _welcomeChannelName &&
+          channel.isStream &&
+          channel.isPrivate &&
+          channel.memberCount <= 1 &&
+          !channel.isArchived,
+    );
+    if (hasWelcomeChannel) return;
+
+    await _createChannel(
+      name: _welcomeChannelName,
+      channelType: 'stream',
+      visibility: 'private',
+      description: _welcomeChannelDescription,
+    );
+  }
+}
+
+/// Builds invite recovery against the active app-level provider container.
+InviteJoinRecovery buildMobileInviteJoinRecovery(Ref ref) {
+  return MobileInviteJoinRecovery(
+    loadChannels: () async {
+      await ref.read(activeCommunityProvider.future);
+      final relayUrl = ref.read(relayConfigProvider).baseUrl;
+      await ref
+          .read(_inviteRelayConnectedProvider(relayUrl).future)
+          .timeout(const Duration(seconds: 15));
+      await ref.read(channelsProvider.notifier).refresh();
+      return ref.read(channelsProvider.future);
+    },
+    createChannel:
+        ({
+          required name,
+          required channelType,
+          required visibility,
+          description,
+          ttlSeconds,
+        }) => ref
+            .read(channelActionsProvider)
+            .createChannel(
+              name: name,
+              channelType: channelType,
+              visibility: visibility,
+              description: description,
+              ttlSeconds: ttlSeconds,
+            ),
+  );
+}
 
 /// App-shell projection that joins Activity state for the Home navigation.
 ///

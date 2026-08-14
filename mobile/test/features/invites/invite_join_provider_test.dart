@@ -7,6 +7,8 @@ import 'package:http/testing.dart' as http_testing;
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:pointycastle/digests/sha256.dart';
 
+import 'package:buzz/app.dart';
+import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/invites/invite_join_provider.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
@@ -88,6 +90,7 @@ void main() {
           communityStorageProvider.overrideWithValue(storage),
           authProvider.overrideWith(() => auth),
           inviteKeyGeneratorProvider.overrideWithValue(() => keys),
+          inviteJoinRecoveryProvider.overrideWithValue(_successfulRecovery()),
           inviteJoinHttpClientProvider.overrideWithValue(
             http_testing.MockClient((request) async {
               capturedRequest = request;
@@ -173,6 +176,125 @@ void main() {
     );
     expect(container.read(inviteJoinProvider).status, InviteJoinStatus.idle);
   });
+
+  test(
+    'invite recovery creates the required private Welcome channel',
+    () async {
+      final created = <String, Object?>{};
+      final recovery = MobileInviteJoinRecovery(
+        loadChannels: () async => const [],
+        createChannel:
+            ({
+              required name,
+              required channelType,
+              required visibility,
+              description,
+              ttlSeconds,
+            }) async {
+              created.addAll({
+                'name': name,
+                'channelType': channelType,
+                'visibility': visibility,
+                'description': description,
+              });
+              return _welcomeChannel;
+            },
+      );
+
+      await recovery.ensureWelcomeChannel();
+
+      expect(created['name'], 'Welcome');
+      expect(created['channelType'], 'stream');
+      expect(created['visibility'], 'private');
+      expect(
+        created['description'],
+        'A private channel for getting oriented in this community.',
+      );
+    },
+  );
+
+  test(
+    'failed Welcome recovery retries without reclaiming or replacing identity',
+    () async {
+      final keys = nostr.Keys.generate();
+      var generatedKeys = 0;
+      var claimRequests = 0;
+      var recoveryAttempts = 0;
+      final storage = CommunityStorage(secure: FakeSecureStorage());
+      final auth = _RecordingAuthNotifier();
+      final recovery = MobileInviteJoinRecovery(
+        loadChannels: () async {
+          recoveryAttempts++;
+          if (recoveryAttempts == 1) {
+            throw Exception('relay disconnected');
+          }
+          return [_welcomeChannel];
+        },
+        createChannel:
+            ({
+              required name,
+              required channelType,
+              required visibility,
+              description,
+              ttlSeconds,
+            }) async => throw StateError('Welcome already exists'),
+      );
+      final container = ProviderContainer(
+        overrides: [
+          communityStorageProvider.overrideWithValue(storage),
+          authProvider.overrideWith(() => auth),
+          inviteKeyGeneratorProvider.overrideWithValue(() {
+            generatedKeys++;
+            return keys;
+          }),
+          inviteJoinRecoveryProvider.overrideWithValue(recovery),
+          inviteJoinHttpClientProvider.overrideWithValue(
+            http_testing.MockClient((request) async {
+              claimRequests++;
+              return http.Response(
+                jsonEncode({
+                  'status': 'joined',
+                  'host': 'relay.example.com',
+                  'role': 'member',
+                }),
+                200,
+              );
+            }),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container
+          .read(inviteJoinProvider.notifier)
+          .prepare(
+            const InviteDeepLink(
+              relayUrl: 'wss://relay.example.com',
+              code: 'code',
+            ),
+          );
+      await container.read(inviteJoinProvider.notifier).confirmJoin();
+
+      final failed = container.read(inviteJoinProvider);
+      expect(failed.status, InviteJoinStatus.error);
+      expect(failed.claimCompleted, isTrue);
+      expect(failed.requiresFreshInvite, isFalse);
+      expect(
+        failed.errorMessage,
+        contains('could not set up your Welcome channel'),
+      );
+
+      await container.read(inviteJoinProvider.notifier).confirmJoin();
+
+      final recovered = container.read(inviteJoinProvider);
+      expect(recovered.status, InviteJoinStatus.success);
+      expect(recovered.errorMessage, isNull);
+      expect(generatedKeys, 1);
+      expect(claimRequests, 1);
+      expect(recoveryAttempts, 2);
+      expect(auth.authenticatedCommunities, hasLength(1));
+    },
+  );
 
   test('join_policy_required requires a fresh link and cannot retry', () async {
     final keys = nostr.Keys.generate();
@@ -272,6 +394,7 @@ void main() {
         communityStorageProvider.overrideWithValue(storage),
         authProvider.overrideWith(() => auth),
         inviteKeyGeneratorProvider.overrideWithValue(() => keys),
+        inviteJoinRecoveryProvider.overrideWithValue(_successfulRecovery()),
         inviteJoinHttpClientProvider.overrideWithValue(
           http_testing.MockClient((request) async {
             attempts++;
@@ -318,6 +441,30 @@ void main() {
     expect(auth.authenticatedCommunities, hasLength(1));
   });
 }
+
+InviteJoinRecovery _successfulRecovery() => MobileInviteJoinRecovery(
+  loadChannels: () async => [_welcomeChannel],
+  createChannel:
+      ({
+        required name,
+        required channelType,
+        required visibility,
+        description,
+        ttlSeconds,
+      }) async => throw StateError('Welcome already exists'),
+);
+
+final _welcomeChannel = Channel(
+  id: 'welcome-id',
+  name: 'Welcome',
+  channelType: 'stream',
+  visibility: 'private',
+  description: 'A private channel for getting oriented in this community.',
+  createdBy: 'me',
+  createdAt: DateTime.utc(2026),
+  memberCount: 1,
+  isMember: true,
+);
 
 class _RecordingAuthNotifier extends AuthNotifier {
   final List<Community> authenticatedCommunities = [];
