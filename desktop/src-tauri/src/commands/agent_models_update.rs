@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn managed_agent_access_policy_changed(
+pub(crate) fn managed_agent_access_policy_changed(
     current_mode: crate::managed_agents::RespondTo,
     current_allowlist: &[String],
     prospective_mode: crate::managed_agents::RespondTo,
@@ -9,6 +9,22 @@ pub(super) fn managed_agent_access_policy_changed(
     prospective_mode != current_mode
         || (prospective_mode == crate::managed_agents::RespondTo::Allowlist
             && prospective_allowlist != current_allowlist)
+}
+
+fn ensure_access_policy_change_supported(
+    record: &ManagedAgentRecord,
+    access_policy_changed: bool,
+) -> Result<(), String> {
+    if access_policy_changed
+        && record.backend != crate::managed_agents::BackendKind::Local
+        && record.backend_agent_id.is_some()
+    {
+        return Err(
+            "Access cannot be changed while this provider-backed agent is deployed because the provider protocol cannot revoke the running deployment safely. Stop or recreate the provider agent first."
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 async fn stop_local_agent_for_access_policy_change(
@@ -216,6 +232,7 @@ pub async fn update_managed_agent(
             prospective_mode,
             &prospective_allowlist,
         );
+        ensure_access_policy_change_supported(record, access_policy_changed)?;
         record.respond_to = prospective_mode;
         // Preserve the persisted allowlist across mode toggles — only replace
         // when the caller explicitly supplied a new list.
@@ -272,7 +289,8 @@ pub async fn update_managed_agent(
                 &crate::managed_agents::load_global_agent_config(&app).unwrap_or_default(),
             )?
         };
-        let rollback = name_changed.then(|| AgentUpdateRollback::new(previous_record, record));
+        let rollback = name_changed
+            .then(|| AgentUpdateRollback::new(previous_record, record, access_policy_changed));
         (summary, sync_params, rollback, access_policy_changed)
     }; // lock dropped here
 
@@ -345,8 +363,13 @@ pub async fn update_managed_agent(
                     Err(error) => format!(" The previous runtime also failed to restart: {error}"),
                 }
             };
+            let rollback_message = if access_policy_changed {
+                "The access policy change was kept, but other edits were rolled back"
+            } else {
+                "No changes were saved"
+            };
             return Err(format!(
-                "Agent rename failed because its relay profile could not be updated. No changes were saved: {sync_error}.{restart_suffix}"
+                "Agent rename failed because its relay profile could not be updated. {rollback_message}: {sync_error}.{restart_suffix}"
             ));
         }
     }
@@ -371,3 +394,7 @@ pub async fn update_managed_agent(
         profile_sync_error: profile_sync_error.take(),
     })
 }
+
+#[cfg(test)]
+#[path = "agent_models_update_tests.rs"]
+mod tests;

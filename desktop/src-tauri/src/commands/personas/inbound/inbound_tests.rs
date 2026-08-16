@@ -262,8 +262,9 @@ fn inbound_managed_agent_drops_injected_secrets_and_harness() {
     let content =
         crate::managed_agents::agent_events::managed_agent_content_from_event(&event).unwrap();
     let mut agents = vec![local_agent()];
-    apply_inbound_managed_agent(&mut agents, AGENT_PUBKEY, content);
+    let access_changed = apply_inbound_managed_agent(&mut agents, AGENT_PUBKEY, content);
 
+    assert!(access_changed, "Anyone must trigger a runtime refresh");
     let a = &agents[0];
     // Secrets / harness / runtime — every one preserved from the local record.
     assert_eq!(

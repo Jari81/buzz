@@ -22,8 +22,8 @@ use crate::{
         find_managed_agent_mut, known_acp_runtime, load_global_agent_config, load_managed_agents,
         load_personas, managed_agent_avatar_url, missing_command_message, normalize_agent_args,
         resolve_command, save_managed_agents, sync_managed_agent_processes, try_regenerate_nest,
-        AgentModelInfo, AgentModelsResponse, UpdateManagedAgentRequest, UpdateManagedAgentResponse,
-        DEFAULT_ACP_COMMAND,
+        AgentModelInfo, AgentModelsResponse, ManagedAgentRecord, UpdateManagedAgentRequest,
+        UpdateManagedAgentResponse, DEFAULT_ACP_COMMAND,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -699,10 +699,8 @@ use databricks::{discover_databricks_models, DatabricksAuthIntent};
 
 #[path = "agent_models_update.rs"]
 mod update;
-pub(super) use update::flush_managed_agent_policy;
-#[cfg(test)]
-use update::managed_agent_access_policy_changed;
 pub use update::update_managed_agent;
+pub(super) use update::{flush_managed_agent_policy, managed_agent_access_policy_changed};
 
 // ── Model normalization ───────────────────────────────────────────────────────
 
