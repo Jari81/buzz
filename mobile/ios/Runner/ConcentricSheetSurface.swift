@@ -20,8 +20,9 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
 
   init(frame: CGRect, arguments args: Any?) {
     let arguments = args as? [String: Any]
-    let colorValue = (arguments?["color"] as? NSNumber)?.uint32Value ?? 0xFFFFFFFF
+    let colorValue = (arguments?["color"] as? NSNumber)?.uint32Value ?? 0xFFFF_FFFF
     let minimumRadius = (arguments?["minimumRadius"] as? NSNumber)?.doubleValue ?? 24
+    let corners = arguments?["corners"] as? String ?? "all"
 
     surfaceView = UIView(frame: frame)
     surfaceView.isOpaque = true
@@ -30,11 +31,23 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
     surfaceView.layer.cornerCurve = .continuous
 
     if #available(iOS 26.0, *) {
-      surfaceView.cornerConfiguration = .uniformCorners(
-        radius: .containerConcentric(minimum: minimumRadius)
-      )
+      let radius = UICornerRadius.containerConcentric(minimum: minimumRadius)
+      surfaceView.cornerConfiguration =
+        corners == "bottom"
+        ? .uniformBottomRadius(
+          radius,
+          topLeftRadius: nil,
+          topRightRadius: nil
+        )
+        : .uniformCorners(radius: radius)
     } else {
       surfaceView.layer.cornerRadius = minimumRadius
+      if corners == "bottom" {
+        surfaceView.layer.maskedCorners = [
+          .layerMinXMaxYCorner,
+          .layerMaxXMaxYCorner,
+        ]
+      }
     }
 
     super.init()

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' show min;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -9,11 +10,13 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 import '../../shared/animated_avatar.dart';
+import '../../shared/huddle/huddle.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
+import '../../shared/widgets/concentric_sheet_surface.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/keyboard_dismiss_on_drag.dart';
@@ -46,6 +49,7 @@ import 'dm_channel_labels.dart';
 import 'ephemeral_channel_display.dart';
 import 'ime_metrics_settle_observer.dart';
 import 'latest_message_button.dart';
+import 'mobile_huddle_controller.dart';
 import 'members_sheet.dart';
 import 'message_actions.dart';
 import 'message_long_press_region.dart';
@@ -63,6 +67,9 @@ import 'timeline_message.dart';
 
 part 'channel_detail_page/message_list.dart';
 part 'channel_detail_page/system_rows.dart';
+part 'channel_detail_page/huddle_sheet.dart';
+part 'channel_detail_page/huddle_call_avatar.dart';
+part 'channel_detail_page/huddle_drawer.dart';
 part 'channel_detail_page/message_bubble.dart';
 part 'channel_detail_page/banners.dart';
 part 'channel_detail_page/app_bar.dart';
@@ -344,6 +351,11 @@ class ChannelDetailPage extends HookConsumerWidget {
                 ],
               ),
         actions: [
+          if (showsComposer)
+            _HuddleButton(
+              channel: resolvedChannel,
+              events: messagesState.value ?? const [],
+            ),
           if (_showsMembersAction(resolvedChannel))
             _MembersButton(
               channelId: resolvedChannel.id,

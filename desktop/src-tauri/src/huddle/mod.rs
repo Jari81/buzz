@@ -81,7 +81,7 @@ pub use window::{close_huddle_companion, open_huddle_window};
 
 // ── Imports ───────────────────────────────────────────────────────────────────
 
-use std::sync::atomic::Ordering;
+use std::sync::{atomic::Ordering, Arc};
 use tauri::State;
 use uuid::Uuid;
 
@@ -489,7 +489,7 @@ fn teardown_huddle(state: &AppState) -> Result<(), String> {
         // Increment generation first — this immediately invalidates any
         // in-flight transcription task, even before pipelines shut down.
         hs.session_generation.fetch_add(1, Ordering::Release);
-        let stt = hs.stt_pipeline.take();
+        let stt = hs.take_stt_pipeline();
         let tts = hs.tts_pipeline.take();
         let cancel = hs.audio_ws_cancel.take();
         // Cancel the relay token BEFORE dropping the sender. If we drop
@@ -793,6 +793,73 @@ pub fn get_model_status(_state: State<'_, AppState>) -> Result<models::VoiceMode
     })
 }
 
+async fn ensure_agent_tts_audio_publisher(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    pipeline: &tts::TtsPipeline,
+    speaker_pubkey: &str,
+) -> Result<bool, String> {
+    if pipeline.has_audio_publisher(speaker_pubkey) {
+        return Ok(true);
+    }
+
+    let app_for_load = app.clone();
+    let speaker_for_load = speaker_pubkey.to_ascii_lowercase();
+    let record = tokio::task::spawn_blocking(move || {
+        crate::managed_agents::load_managed_agents(&app_for_load).map(|agents| {
+            agents.into_iter().find(|agent| {
+                agent.pubkey.eq_ignore_ascii_case(&speaker_for_load)
+                    && !agent.private_key_nsec.trim().is_empty()
+            })
+        })
+    })
+    .await
+    .map_err(|error| format!("managed-agent identity task failed: {error}"))??;
+    let Some(record) = record else {
+        return Ok(false);
+    };
+
+    let keys = nostr::Keys::parse(record.private_key_nsec.trim())
+        .map_err(|error| format!("managed-agent identity is unavailable: {error}"))?;
+    if !keys
+        .public_key()
+        .to_hex()
+        .eq_ignore_ascii_case(speaker_pubkey)
+    {
+        return Err("managed-agent identity does not match the Huddle speaker".to_string());
+    }
+    let (ephemeral_channel_id, parent_channel_id) = {
+        let huddle = state.huddle()?;
+        (
+            huddle
+                .ephemeral_channel_id
+                .clone()
+                .ok_or("active Huddle has no backing channel")?,
+            huddle.parent_channel_id.clone(),
+        )
+    };
+    let has_bot_membership =
+        relay_api::fetch_channel_members_with_roles(&ephemeral_channel_id, state)
+            .await?
+            .into_iter()
+            .any(|(pubkey, role)| {
+                pubkey.eq_ignore_ascii_case(speaker_pubkey) && role.as_deref() == Some("bot")
+            });
+    if !has_bot_membership {
+        return Err("agent is not an active bot member of the Huddle".to_string());
+    }
+    let publisher = relay_api::connect_tts_audio_publisher(
+        &ephemeral_channel_id,
+        parent_channel_id.as_deref(),
+        state,
+        &keys,
+        record.auth_tag.as_deref(),
+    )
+    .await?;
+    pipeline.register_audio_publisher(speaker_pubkey, publisher);
+    Ok(true)
+}
+
 /// Speak an agent message via TTS.
 ///
 /// Called by the WebView when it receives an eligible live agent message.
@@ -873,7 +940,7 @@ pub async fn speak_agent_message(
         })?;
     }
 
-    let sender = {
+    let pipeline = {
         let hs = state.huddle()?;
         let agent_is_present = hs
             .agent_pubkeys
@@ -887,20 +954,27 @@ pub async fn speak_agent_message(
             );
             return Ok(());
         }
-        hs.tts_pipeline
-            .as_ref()
-            .map(|pipeline| pipeline.text_sender())
-            .map(|sender| {
-                let speaker_generation = sender.speaker_generation(&speaker_pubkey);
-                (sender, speaker_generation)
-            })
+        hs.tts_pipeline.as_ref().map(Arc::clone)
     };
-    let Some((sender, speaker_generation)) = sender else {
+    let Some(pipeline) = pipeline else {
         eprintln!(
             "buzz-desktop: tts stage=invoke status=failed reason=unavailable route_id={route_id}"
         );
         return Err("Agent text to speech is enabled but its audio pipeline is unavailable".into());
     };
+    match ensure_agent_tts_audio_publisher(&app, &state, &pipeline, &speaker_pubkey).await {
+        Ok(true) => eprintln!(
+            "buzz-desktop: tts broadcast status=ready route_id={route_id}"
+        ),
+        Ok(false) => eprintln!(
+            "buzz-desktop: tts broadcast status=unavailable reason=agent_identity_not_local route_id={route_id}"
+        ),
+        Err(error) => eprintln!(
+            "buzz-desktop: tts broadcast status=unavailable reason=publisher_setup_failed route_id={route_id} error={error}"
+        ),
+    }
+    let sender = pipeline.text_sender();
+    let speaker_generation = sender.speaker_generation(&speaker_pubkey);
     enqueue_agent_tts_text(route_id, text, move |route_id, text| {
         sender
             .send(

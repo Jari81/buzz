@@ -72,6 +72,10 @@ use speaker_cancellation::*;
 #[path = "tts_streaming.rs"]
 mod streaming;
 use streaming::*;
+#[path = "tts_broadcast.rs"]
+mod broadcast;
+use broadcast::TtsBroadcasters;
+pub(crate) use broadcast::{TtsAudioPublisher, TtsBroadcastPacket};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -115,6 +119,7 @@ type WorkerControlState = (
     ActiveSpeaker,
     SpeakerCancellation,
     PlaybackProbe,
+    TtsBroadcasters,
 );
 
 // ── Public pipeline handle ────────────────────────────────────────────────────
@@ -154,6 +159,9 @@ pub struct TtsPipeline {
     playback_probe: PlaybackProbe,
     /// Completed after the worker drains pre-change text and installs the new style.
     voice_change_ack: VoiceChangeAck,
+    /// Agent-authenticated Huddle publishers used to carry synthesized speech
+    /// to remote clients without impersonating the hosting human.
+    broadcasters: TtsBroadcasters,
     /// Worker thread handle — taken on drop to join cleanly.
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -195,6 +203,8 @@ impl TtsPipeline {
         let worker_playback_probe = playback_probe.clone();
         let voice_change_ack = Arc::new(Mutex::new(None));
         let worker_voice_change_ack = Arc::clone(&voice_change_ack);
+        let broadcasters = TtsBroadcasters::default();
+        let worker_broadcasters = broadcasters.clone();
         let model_dir_worker = model_dir.clone();
         let (startup_tx, startup_rx) = mpsc::sync_channel(1);
 
@@ -217,6 +227,7 @@ impl TtsPipeline {
                         worker_active_speaker,
                         worker_speaker_cancel,
                         worker_playback_probe,
+                        worker_broadcasters,
                     ),
                     output_device,
                     activity_app,
@@ -239,6 +250,7 @@ impl TtsPipeline {
             speaker_cancel,
             playback_probe,
             voice_change_ack,
+            broadcasters,
             thread: Some(handle),
         })
     }
@@ -247,6 +259,7 @@ impl TtsPipeline {
 impl Drop for TtsPipeline {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
+        self.broadcasters.shutdown();
         // Dropping `text_tx` unblocks the worker's recv_timeout loop.
         // Join to ensure the audio thread exits cleanly.
         if let Some(thread) = self.thread.take() {
@@ -275,6 +288,7 @@ fn tts_worker(
         active_speaker,
         speaker_cancel,
         playback_probe,
+        broadcasters,
     ) = control_state;
     let (cancel, voice_cancel) = cancel_signals;
     // ── 1. Initialise TTS engine ──────────────────────────────────────────────
@@ -410,6 +424,7 @@ fn tts_worker(
         activity_frames: Arc::clone(&activity_frames),
         active_speaker: Arc::clone(&active_speaker),
         speaker_cancel: Arc::clone(&speaker_cancel),
+        broadcasters: broadcasters.clone(),
         activity_app,
     });
     if let Err(ref e) = monitor {
@@ -445,6 +460,7 @@ fn tts_worker(
             || voice_cancel.load(Ordering::Acquire)
             || shutdown.load(Ordering::Acquire)
         {
+            broadcasters.cancel_all();
             let reason = if shutdown.load(Ordering::Acquire) {
                 "shutdown"
             } else if cancel.load(Ordering::Acquire) {
@@ -490,6 +506,7 @@ fn tts_worker(
                     pubkey,
                     SAMPLE_RATE as usize,
                 ));
+            broadcasters.publish(pubkey, speaker_generation, prepared.buffer.clone());
         }
         player.append(SamplesBuffer::new(channels, rate, prepared.buffer));
         eprintln!(
@@ -513,6 +530,12 @@ fn tts_worker(
         ) {
             first_append = true;
             continue;
+        }
+        if cancel.load(Ordering::Acquire)
+            || voice_cancel.load(Ordering::Acquire)
+            || shutdown.load(Ordering::Acquire)
+        {
+            broadcasters.cancel_all();
         }
         if handle_cancel_or_shutdown(
             (&cancel, &voice_cancel),
@@ -575,6 +598,12 @@ fn tts_worker(
         // Check cancel again after unblocking — a cancel may have arrived
         // while we were waiting.
         let pending_route_id = queued_text.as_ref().map(|queued| queued.route_id);
+        if cancel.load(Ordering::Acquire)
+            || voice_cancel.load(Ordering::Acquire)
+            || shutdown.load(Ordering::Acquire)
+        {
+            broadcasters.cancel_all();
+        }
         if handle_cancel_or_shutdown(
             (&cancel, &voice_cancel),
             &shutdown,
@@ -709,6 +738,12 @@ fn tts_worker(
         let mut model_unit_index = 0_usize;
         'playback_chunks: for chunk in &chunks {
             let mut no_current_text = None;
+            if cancel.load(Ordering::Acquire)
+                || voice_cancel.load(Ordering::Acquire)
+                || shutdown.load(Ordering::Acquire)
+            {
+                broadcasters.cancel_all();
+            }
             if handle_cancel_or_shutdown(
                 (&cancel, &voice_cancel),
                 &shutdown,
@@ -784,6 +819,12 @@ fn tts_worker(
                 let chunk_index = model_unit_index;
                 model_unit_index += 1;
                 let mut no_current_text = None;
+                if cancel.load(Ordering::Acquire)
+                    || voice_cancel.load(Ordering::Acquire)
+                    || shutdown.load(Ordering::Acquire)
+                {
+                    broadcasters.cancel_all();
+                }
                 if handle_cancel_or_shutdown(
                     (&cancel, &voice_cancel),
                     &shutdown,

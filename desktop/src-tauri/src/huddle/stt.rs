@@ -51,11 +51,22 @@ const MAX_SPEECH_SAMPLES: usize = 16_000 * 30;
 #[derive(Debug)]
 pub struct SttPipeline {
     /// Send raw PCM bytes (f32 LE, 48 kHz mono) into the pipeline.
-    audio_tx: SyncSender<Vec<u8>>,
+    audio_tx: SyncSender<SttAudioInput>,
     /// Signals the worker thread to stop.
     shutdown: Arc<AtomicBool>,
     /// Worker thread handle — taken on drop to join cleanly.
     thread: Option<thread::JoinHandle<()>>,
+}
+
+struct SttAudioInput {
+    pcm_bytes: Vec<u8>,
+    origin: SttAudioOrigin,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SttAudioOrigin {
+    Local,
+    RemoteHuman,
 }
 
 impl SttPipeline {
@@ -85,7 +96,7 @@ impl SttPipeline {
         ptt_active: Option<Arc<AtomicBool>>,
         manual_mic_unmuted: Option<Arc<AtomicBool>>,
     ) -> Result<(Self, tokio_mpsc::Receiver<String>), String> {
-        let (audio_tx, audio_rx) = mpsc::sync_channel::<Vec<u8>>(AUDIO_QUEUE_DEPTH);
+        let (audio_tx, audio_rx) = mpsc::sync_channel::<SttAudioInput>(AUDIO_QUEUE_DEPTH);
         let (text_tx, text_rx) = tokio_mpsc::channel::<String>(64);
         let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -130,6 +141,18 @@ impl SttPipeline {
     /// Non-blocking. Drops audio silently if the pipeline can't keep up —
     /// better to lose frames than to stall the UI thread.
     pub fn push_audio(&self, pcm_bytes: Vec<u8>) -> Result<(), String> {
+        self.push_audio_from(pcm_bytes, SttAudioOrigin::Local)
+    }
+
+    /// Feed decoded remote-human PCM into transcription. Unlike the desktop
+    /// microphone path, this is not gated by the desktop PTT or mute state: the
+    /// remote participant already made their transmission choice on their own
+    /// device before the relay delivered these samples.
+    pub fn push_remote_audio(&self, pcm_bytes: Vec<u8>) -> Result<(), String> {
+        self.push_audio_from(pcm_bytes, SttAudioOrigin::RemoteHuman)
+    }
+
+    fn push_audio_from(&self, pcm_bytes: Vec<u8>, origin: SttAudioOrigin) -> Result<(), String> {
         // Reject non-4-byte-aligned input — would silently truncate in bytes_to_f32.
         if !pcm_bytes.len().is_multiple_of(4) {
             return Err(format!(
@@ -138,7 +161,7 @@ impl SttPipeline {
             ));
         }
         // Drop audio if the pipeline can't keep up — better than blocking the UI.
-        let _ = self.audio_tx.try_send(pcm_bytes);
+        let _ = self.audio_tx.try_send(SttAudioInput { pcm_bytes, origin });
         Ok(())
     }
 }
@@ -213,31 +236,50 @@ fn stt_speculative_decode() -> bool {
     std::env::var("BUZZ_STT_SPECULATIVE").is_ok_and(|v| v == "1")
 }
 
+struct SttStreamState {
+    resampler: rubato::Fft<f32>,
+    chunk_in: usize,
+    input_buf_48k: Vec<f32>,
+    leftover_16k: Vec<f32>,
+    vad: earshot::Detector<earshot::DefaultPredictor>,
+    speech_buf: Vec<f32>,
+    silence_frames: usize,
+    in_speech: bool,
+    voiced_frames: usize,
+    speculative: Option<(String, usize)>,
+}
+
+impl SttStreamState {
+    fn new() -> Result<Self, String> {
+        use rubato::{FixedSync, Resampler};
+
+        let resampler = rubato::Fft::<f32>::new(48_000, 16_000, 1024, 2, 1, FixedSync::Input)
+            .map_err(|error| format!("STT resampler init failed: {error}"))?;
+        let chunk_in = resampler.input_frames_next();
+        Ok(Self {
+            resampler,
+            chunk_in,
+            input_buf_48k: Vec::with_capacity(chunk_in * 2),
+            leftover_16k: Vec::new(),
+            vad: earshot::Detector::new(earshot::DefaultPredictor::new()),
+            speech_buf: Vec::new(),
+            silence_frames: 0,
+            in_speech: false,
+            voiced_frames: 0,
+            speculative: None,
+        })
+    }
+}
+
 fn stt_worker(
     model_dir: PathBuf,
-    audio_rx: Receiver<Vec<u8>>,
+    audio_rx: Receiver<SttAudioInput>,
     text_tx: tokio_mpsc::Sender<String>,
     shutdown: Arc<AtomicBool>,
     ptt_active: Option<Arc<AtomicBool>>,
     manual_mic_unmuted: Option<Arc<AtomicBool>>,
 ) {
-    // ── 1. Initialise rubato resampler (48 kHz → 16 kHz, mono) ───────────────
-    use rubato::{Fft, FixedSync, Resampler};
-
-    let mut resampler = match Fft::<f32>::new(48_000, 16_000, 1024, 2, 1, FixedSync::Input) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("buzz-desktop: STT resampler init failed: {e}");
-            return;
-        }
-    };
-    let chunk_in = resampler.input_frames_next();
-
-    // ── 2. Initialise earshot VAD ─────────────────────────────────────────────
-    use earshot::{DefaultPredictor, Detector};
-    let mut vad = Detector::new(DefaultPredictor::new());
-
-    // ── 3. Initialise sherpa-onnx recognizer ─────────────────────────────────
+    // ── 1. Initialise sherpa-onnx recognizer ─────────────────────────────────
     //
     // Parakeet TDT-CTC 110M ships as a single `model.int8.onnx` (CTC head) plus
     // `tokens.txt`. sherpa-onnx infers the model family from which inner config
@@ -274,27 +316,28 @@ fn stt_worker(
         }
     };
 
-    // ── 4. Processing state ───────────────────────────────────────────────────
-    // Leftover 48 kHz samples that didn't fill a full resampler chunk.
-    let mut input_buf_48k: Vec<f32> = Vec::with_capacity(chunk_in * 2);
-    // Leftover 16 kHz samples that didn't fill a full VAD frame.
-    let mut leftover_16k: Vec<f32> = Vec::new();
-    // Accumulated speech frames (16 kHz).
-    let mut speech_buf: Vec<f32> = Vec::new();
-    // Consecutive silence frame count.
-    let mut silence_frames: usize = 0;
-    // Whether we're currently in a speech segment.
-    let mut in_speech = false;
-    // Number of frames earshot classified as voiced in the current segment.
-    let mut voiced_frames = 0;
-    // Silence flush window (frames) — fixed at the production value.
-    let flush_frames = SILENCE_FLUSH_FRAMES;
+    // ── 2. Independent local and remote processing state ─────────────────────
+    // Keeping separate resampler/VAD state prevents concurrent desktop and
+    // remote speech from being serialized into one artificial waveform.
+    let mut local_stream = match SttStreamState::new() {
+        Ok(stream) => stream,
+        Err(error) => {
+            eprintln!("buzz-desktop: {error}");
+            return;
+        }
+    };
+    let mut remote_stream = match SttStreamState::new() {
+        Ok(stream) => stream,
+        Err(error) => {
+            eprintln!("buzz-desktop: {error}");
+            return;
+        }
+    };
     // EXPERIMENTAL: speculative decode result + the voiced-frame count it was
     // computed at. Valid only while no new voiced frame has arrived since.
     let speculative_enabled = stt_speculative_decode();
-    let mut speculative: Option<(String, usize)> = None;
 
-    // ── 5. Main loop ──────────────────────────────────────────────────────────
+    // ── 3. Main loop ──────────────────────────────────────────────────────────
     let mut transmit_was_active = ptt_active
         .as_ref()
         .is_some_and(|ptt| ptt.load(Ordering::Acquire))
@@ -315,60 +358,96 @@ fn stt_worker(
                 || manual_mic_unmuted
                     .as_ref()
                     .is_some_and(|manual| manual.load(Ordering::Acquire));
-            if transmit_was_active && !transmit_now && in_speech && !speech_buf.is_empty() {
-                flush_to_stt(&speech_buf, voiced_frames, &recognizer, &text_tx);
-                speech_buf.clear();
-                silence_frames = 0;
-                in_speech = false;
-                voiced_frames = 0;
+            if transmit_was_active
+                && !transmit_now
+                && local_stream.in_speech
+                && !local_stream.speech_buf.is_empty()
+            {
+                flush_to_stt(
+                    &local_stream.speech_buf,
+                    local_stream.voiced_frames,
+                    &recognizer,
+                    &text_tx,
+                );
+                local_stream.speech_buf.clear();
+                local_stream.silence_frames = 0;
+                local_stream.in_speech = false;
+                local_stream.voiced_frames = 0;
             }
             transmit_was_active = transmit_now;
         }
 
         // Use recv_timeout so we can periodically check the shutdown flag.
-        let bytes = match audio_rx.recv_timeout(RECV_TIMEOUT) {
-            Ok(b) => b,
+        let input = match audio_rx.recv_timeout(RECV_TIMEOUT) {
+            Ok(input) => input,
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => break, // Sender dropped.
         };
 
         // Drain any additional pending messages to batch-process.
-        let mut batch = vec![bytes];
-        while let Ok(b) = audio_rx.try_recv() {
-            batch.push(b);
+        let mut batch = vec![input];
+        while let Ok(input) = audio_rx.try_recv() {
+            batch.push(input);
         }
 
-        for bytes in batch {
-            // Convert raw bytes to f32 samples (little-endian).
-            let samples_48k = bytes_to_f32(&bytes);
-            input_buf_48k.extend_from_slice(&samples_48k);
-
-            // Resample in chunk_in-sized blocks.
-            while input_buf_48k.len() >= chunk_in {
-                let chunk: Vec<f32> = input_buf_48k.drain(..chunk_in).collect();
-                let resampled = resample_chunk(&mut resampler, &chunk);
-                process_16k_samples(
-                    &resampled,
-                    &mut leftover_16k,
-                    &mut vad,
-                    &mut speech_buf,
-                    &mut silence_frames,
-                    &mut in_speech,
-                    &mut voiced_frames,
-                    flush_frames,
-                    (speculative_enabled, &mut speculative),
-                    &recognizer,
-                    &text_tx,
+        for input in batch {
+            let (stream, ptt_gate, manual_gate) = match input.origin {
+                SttAudioOrigin::Local => (
+                    &mut local_stream,
                     ptt_active.as_ref(),
                     manual_mic_unmuted.as_ref(),
-                );
-            }
+                ),
+                SttAudioOrigin::RemoteHuman => (&mut remote_stream, None, None),
+            };
+            process_stt_input(
+                stream,
+                &input.pcm_bytes,
+                speculative_enabled,
+                &recognizer,
+                &text_tx,
+                ptt_gate,
+                manual_gate,
+            );
         }
     }
 
     // No final flush — leave_huddle/end_huddle emit lifecycle events before
     // the STT worker exits, so a final flush would post a kind:9 message AFTER
     // the user has "left." Losing the last partial utterance is acceptable.
+}
+
+fn process_stt_input(
+    stream: &mut SttStreamState,
+    pcm_bytes: &[u8],
+    speculative_enabled: bool,
+    recognizer: &sherpa_onnx::OfflineRecognizer,
+    text_tx: &tokio_mpsc::Sender<String>,
+    ptt_active: Option<&Arc<AtomicBool>>,
+    manual_mic_unmuted: Option<&Arc<AtomicBool>>,
+) {
+    stream
+        .input_buf_48k
+        .extend_from_slice(&bytes_to_f32(pcm_bytes));
+
+    while stream.input_buf_48k.len() >= stream.chunk_in {
+        let chunk: Vec<f32> = stream.input_buf_48k.drain(..stream.chunk_in).collect();
+        let resampled = resample_chunk(&mut stream.resampler, &chunk);
+        process_16k_samples(
+            &resampled,
+            &mut stream.leftover_16k,
+            &mut stream.vad,
+            &mut stream.speech_buf,
+            &mut stream.silence_frames,
+            &mut stream.in_speech,
+            &mut stream.voiced_frames,
+            SILENCE_FLUSH_FRAMES,
+            (speculative_enabled, &mut stream.speculative),
+            recognizer,
+            text_tx,
+            ptt_active,
+            manual_mic_unmuted,
+        );
+    }
 }
 
 /// Resample a mono 48 kHz chunk to 16 kHz using rubato.

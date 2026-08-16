@@ -229,6 +229,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     }
 
     final hiddenDmIds = await _fetchHiddenDmIds(session, myPk);
+    final huddleBackingIds = await _fetchHuddleBackingIds(session, channelIds);
 
     final channels = <Channel>[];
     for (final event in dedupedMetas) {
@@ -238,6 +239,12 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         displayNames: displayNames,
       );
       if (channel.isDm && hiddenDmIds.contains(channel.id)) continue;
+      if (huddleBackingIds.contains(channel.id) &&
+          channel.isStream &&
+          channel.isPrivate &&
+          channel.ttlSeconds == 3600) {
+        continue;
+      }
       // Ephemeral (TTL) channels are surfaced in the list with an
       // `_EphemeralBadge` rendered in `channels_page.dart` — they shouldn't be
       // hidden. Desktop shows them too. Previously dropped here unconditionally,
@@ -473,6 +480,30 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
           if (tag.length >= 2 && tag[0] == 'h') tag[1],
       };
     } catch (_) {
+      return const {};
+    }
+  }
+
+  Future<Set<String>> _fetchHuddleBackingIds(
+    RelaySessionNotifier session,
+    List<String> parentChannelIds,
+  ) async {
+    if (parentChannelIds.isEmpty) return const {};
+    try {
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final events = await session.fetchHistory(
+        NostrFilter(
+          kinds: const [EventKind.huddleStarted],
+          tags: {'#h': parentChannelIds},
+          since: now - const Duration(hours: 2).inSeconds,
+          limit: 500,
+        ),
+      );
+      return {for (final event in events) ?_huddleBackingId(event.content)};
+    } catch (error) {
+      debugPrint(
+        '[ChannelsNotifier] Huddle backing-channel query failed: $error',
+      );
       return const {};
     }
   }
@@ -934,3 +965,15 @@ Set<String> _readRootIdSet(String? raw) {
 }
 
 String _encodeRootIdSet(Set<String> values) => jsonEncode(values.toList());
+
+String? _huddleBackingId(String content) {
+  try {
+    final decoded = jsonDecode(content);
+    if (decoded is! Map) return null;
+    final value = decoded['ephemeral_channel_id'];
+    if (value is! String || value.isEmpty) return null;
+    return value;
+  } catch (_) {
+    return null;
+  }
+}

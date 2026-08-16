@@ -92,6 +92,38 @@ fn should_recover_playout(depth: usize, currently_recovering: bool) -> bool {
     }
 }
 
+fn is_agent_audio_peer(
+    peer_idx: u8,
+    index_to_pubkey: &std::collections::HashMap<u8, String>,
+    agent_pubkeys: &std::sync::Mutex<Vec<String>>,
+) -> bool {
+    let Some(pubkey) = index_to_pubkey.get(&peer_idx) else {
+        return false;
+    };
+    agent_pubkeys
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .iter()
+        .any(|agent| agent.eq_ignore_ascii_case(pubkey))
+}
+
+fn mix_remote_stt_samples(mix: &mut Vec<f32>, samples: &[f32]) {
+    if mix.len() < samples.len() {
+        mix.resize(samples.len(), 0.0);
+    }
+    for (mixed, sample) in mix.iter_mut().zip(samples) {
+        *mixed = (*mixed + *sample).clamp(-1.0, 1.0);
+    }
+}
+
+fn f32_samples_to_le_bytes(samples: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(std::mem::size_of_val(samples));
+    for sample in samples {
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    bytes
+}
+
 /// One remote peer's slot: jitter buffer + dedicated rodio Player.
 ///
 /// Per-frame seq/timestamp come from the v2 wire header (sender-authored).
@@ -171,6 +203,8 @@ pub(crate) async fn run_playout_recv_loop(
     initial_peers: Vec<(u8, String)>,
     tts_active: Arc<AtomicBool>,
     tts_cancel: Arc<AtomicBool>,
+    agent_pubkeys: Arc<std::sync::Mutex<Vec<String>>>,
+    remote_stt_pipeline: Arc<std::sync::Mutex<Option<std::sync::Weak<super::stt::SttPipeline>>>>,
 ) {
     use rodio::buffer::SamplesBuffer;
     use std::num::NonZero;
@@ -215,6 +249,7 @@ pub(crate) async fn run_playout_recv_loop(
                 // per idle peer into rodio forever. `is_active` is a 500 ms
                 // grace past the last received packet, far longer than typical
                 // DTX comfort-noise cadence.
+                let mut remote_stt_mix = Vec::new();
                 for (peer_idx, slot) in peers.iter_mut() {
                     if !slot.is_active() {
                         // Still drain the frame to keep NetEq's internal clock
@@ -236,6 +271,13 @@ pub(crate) async fn run_playout_recv_loop(
                                 );
                                 slot.player.skip_one();
                             }
+                            if !is_agent_audio_peer(
+                                *peer_idx,
+                                &index_to_pubkey,
+                                &agent_pubkeys,
+                            ) {
+                                mix_remote_stt_samples(&mut remote_stt_mix, &samples);
+                            }
                             slot.player.append(SamplesBuffer::new(channels, rate, samples));
                         }
                         Err(e) => {
@@ -243,6 +285,18 @@ pub(crate) async fn run_playout_recv_loop(
                                 "buzz-desktop: jitter get_audio peer {peer_idx}: {e}"
                             );
                         }
+                    }
+                }
+                if !remote_stt_mix.is_empty() {
+                    let pipeline = remote_stt_pipeline
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .as_ref()
+                        .and_then(std::sync::Weak::upgrade);
+                    if let Some(pipeline) = pipeline {
+                        let _ = pipeline.push_remote_audio(f32_samples_to_le_bytes(
+                            &remote_stt_mix,
+                        ));
                     }
                 }
             }
@@ -282,6 +336,13 @@ pub(crate) async fn run_playout_recv_loop(
                             continue;
                         }
                         let peer_idx = data[0];
+                        // Desktop renders each agent with its device-local Pocket
+                        // voice. A locally managed agent may also publish that
+                        // synthesized stream for mobile listeners; suppress it
+                        // here so desktop clients do not hear local TTS twice.
+                        if is_agent_audio_peer(peer_idx, &index_to_pubkey, &agent_pubkeys) {
+                            continue;
+                        }
                         let after_idx = &data[1..];
                         let Some((header, opus_bytes)) = FrameHeader::parse(after_idx)
                         else {
@@ -469,5 +530,30 @@ mod tests {
         assert!(should_recover_playout(10, false));
         assert!(should_recover_playout(5, true));
         assert!(!should_recover_playout(4, true));
+    }
+
+    #[test]
+    fn agent_audio_is_suppressed_only_for_matching_roster_identity() {
+        let peers = std::collections::HashMap::from([
+            (3, "agent-pubkey".to_string()),
+            (4, "human-pubkey".to_string()),
+        ]);
+        let agents = std::sync::Mutex::new(vec!["AGENT-PUBKEY".to_string()]);
+
+        assert!(is_agent_audio_peer(3, &peers, &agents));
+        assert!(!is_agent_audio_peer(4, &peers, &agents));
+        assert!(!is_agent_audio_peer(9, &peers, &agents));
+    }
+
+    #[test]
+    fn remote_human_stt_mix_sums_and_clamps_concurrent_speakers() {
+        let mut mix = Vec::new();
+        mix_remote_stt_samples(&mut mix, &[0.4, -0.7, 0.2]);
+        mix_remote_stt_samples(&mut mix, &[0.8, -0.6, -0.1]);
+
+        assert_eq!(mix, vec![1.0, -1.0, 0.1]);
+        let bytes = f32_samples_to_le_bytes(&mix);
+        assert_eq!(bytes.len(), std::mem::size_of_val(mix.as_slice()));
+        assert_eq!(f32::from_le_bytes(bytes[0..4].try_into().unwrap()), 1.0);
     }
 }

@@ -10,6 +10,7 @@ pub(super) struct TtsMonitorState {
     pub(super) activity_frames: Arc<Mutex<VecDeque<TtsSpeakerActivityFrame>>>,
     pub(super) active_speaker: ActiveSpeaker,
     pub(super) speaker_cancel: SpeakerCancellation,
+    pub(super) broadcasters: TtsBroadcasters,
     pub(super) activity_app: Option<tauri::AppHandle>,
 }
 
@@ -27,6 +28,7 @@ pub(super) fn spawn_tts_monitor(state: TtsMonitorState) -> std::io::Result<threa
                     if state.cancel.load(Ordering::Acquire)
                         || state.voice_cancel.load(Ordering::Acquire)
                     {
+                        state.broadcasters.cancel_all();
                         state.player.clear();
                         state.player.play();
                         state

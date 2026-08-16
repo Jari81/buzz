@@ -415,6 +415,47 @@ void main() {
     expect(ephemeral.ttlSeconds, 86400);
   });
 
+  test(
+    'Huddle-linked one-hour private streams stay out of channel lists',
+    () async {
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final session = _FakeRelaySession(
+        memberships: [
+          _membership(_channelA, myPk),
+          _membership(_channelB, myPk),
+        ],
+        metadata: [
+          _meta(id: _channelA, name: 'general'),
+          _meta(
+            id: _channelB,
+            name: 'huddle-22222222',
+            ttlSeconds: 3600,
+            visibility: 'private',
+          ),
+        ],
+        huddleStarts: [
+          NostrEvent(
+            id: 'huddle-start',
+            pubkey: myPk,
+            createdAt: now,
+            kind: EventKind.huddleStarted,
+            tags: const [
+              ['h', _channelA],
+            ],
+            content: '{"ephemeral_channel_id":"$_channelB"}',
+            sig: 'sig',
+          ),
+        ],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+
+      final channels = await container.read(channelsProvider.future);
+
+      expect(channels.map((channel) => channel.id), [_channelA]);
+    },
+  );
+
   test('hidden DMs are filtered from the channel list', () async {
     final session = _FakeRelaySession(
       memberships: [_membership(_channelA, myPk), _membership(_channelB, myPk)],
@@ -701,6 +742,7 @@ NostrEvent _meta({
   String channelType = 'stream',
   int createdAt = 1,
   int? ttlSeconds,
+  String visibility = 'open',
   bool archived = false,
 }) => NostrEvent(
   id: 'meta-$id',
@@ -711,7 +753,7 @@ NostrEvent _meta({
     ['d', id],
     ['name', name],
     ['t', channelType],
-    ['public'],
+    [visibility == 'private' ? 'private' : 'public'],
     if (ttlSeconds != null) ['ttl', '$ttlSeconds'],
     if (archived) ['archived', 'true'],
   ],
@@ -745,6 +787,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
     required this.memberships,
     required this.metadata,
     this.hiddenDmEvents = const [],
+    this.huddleStarts = const [],
     this.recentMessages = const [],
     this.membershipFailures = 0,
   });
@@ -752,6 +795,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
   List<NostrEvent> memberships;
   List<NostrEvent> metadata;
   final List<NostrEvent> hiddenDmEvents;
+  final List<NostrEvent> huddleStarts;
   final List<NostrEvent> recentMessages;
   int membershipFailures;
 
@@ -818,6 +862,9 @@ class _FakeRelaySession extends RelaySessionNotifier {
     }
     if (filter.kinds.contains(EventKind.dmVisibility)) {
       return hiddenDmEvents;
+    }
+    if (filter.kinds.contains(EventKind.huddleStarted)) {
+      return huddleStarts;
     }
     if (filter.kinds.contains(39000)) {
       // Metadata query — return all metadata events whose `d` tag matches.

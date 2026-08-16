@@ -7,6 +7,35 @@ import XCTest
 
 class RunnerTests: XCTestCase {
 
+  func testHuddleOpusCodecRoundTripsFixedV2Frame() throws {
+    let encoder = try HuddleOpusEncoder()
+    let decoder = try HuddleOpusDecoder()
+    let samples = (0..<HuddleAudioFormats.frameSamples).map { index in
+      Float(sin(2 * .pi * 440 * Double(index) / HuddleAudioFormats.sampleRate))
+    }
+
+    let packet = try encoder.encode(samples)
+    let decoded = try decoder.decode(packet)
+
+    XCTAssertFalse(packet.isEmpty)
+    XCTAssertLessThanOrEqual(packet.count, HuddleAudioFormats.maximumOpusPacketBytes)
+    XCTAssertGreaterThan(decoded.frameLength, 0)
+    XCTAssertLessThanOrEqual(
+      decoded.frameLength,
+      AVAudioFrameCount(HuddleAudioFormats.frameSamples)
+    )
+  }
+
+  func testHuddleAudioLevelsReportDbovWithoutPersistingAudio() {
+    let silence = Array(repeating: Float.zero, count: HuddleAudioFormats.frameSamples)
+    let halfScale = Array(repeating: Float(0.5), count: HuddleAudioFormats.frameSamples)
+
+    XCTAssertEqual(HuddleAudioLevels.rmsDbov(silence), -127)
+    XCTAssertEqual(HuddleAudioLevels.peakDbov(silence), -127)
+    XCTAssertEqual(HuddleAudioLevels.rmsDbov(halfScale), -6)
+    XCTAssertEqual(HuddleAudioLevels.peakDbov(halfScale), -6)
+  }
+
   func testRelativeTrackInsertionTimesPreserveAudioDelay() {
     let times = AppDelegate.relativeTrackInsertionTimes(
       videoStart: CMTime(seconds: 1, preferredTimescale: 600),

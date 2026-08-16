@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
@@ -220,6 +221,59 @@ void main() {
         ['h', 'channel-id'],
       ]);
     });
+  });
+
+  group('Huddle channel lifecycle', () {
+    test(
+      'starts from accepted signed events without refreshing all channels',
+      () async {
+        final keys = nostr.Keys.generate();
+        final session = _RecordingPublishRelaySession();
+        final actionsProvider = Provider<ChannelActions>((ref) {
+          return ChannelActions(
+            ref: ref,
+            session: session,
+            signedEventRelay: SignedEventRelay(
+              session: session,
+              nsec: keys.nsec,
+            ),
+            currentPubkey: keys.public,
+          );
+        });
+        final container = ProviderContainer(
+          retry: (_, _) => null,
+          overrides: [
+            relaySessionProvider.overrideWith(() => session),
+            myPubkeyProvider.overrideWithValue(keys.public),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        final actions = container.read(actionsProvider);
+        final backingChannelId = await actions.createHuddleBackingChannel();
+        final started = await actions.announceHuddleStarted(
+          parentChannelId: _channelId,
+          ephemeralChannelId: backingChannelId,
+        );
+
+        expect(session.historyQueryCount, 0);
+        expect(session.publishedEvents, hasLength(2));
+        final create = session.publishedEvents.first;
+        expect(create.kind, 9007);
+        expect(create.tags, contains(equals(['h', backingChannelId])));
+        expect(create.tags, contains(equals(['visibility', 'private'])));
+        expect(create.tags, contains(equals(['channel_type', 'stream'])));
+        expect(create.tags, contains(equals(['ttl', '3600'])));
+
+        final start = session.publishedEvents.last;
+        expect(start.kind, EventKind.huddleStarted);
+        expect(start.tags, [
+          ['h', _channelId],
+        ]);
+        expect(start.content, '{"ephemeral_channel_id":"$backingChannelId"}');
+        expect(started.id, start.id);
+      },
+    );
   });
 
   group('channelMembersProvider', () {
@@ -446,6 +500,32 @@ void main() {
 const _channelId = '11111111-1111-4111-8111-111111111111';
 const _memberPubkey =
     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+
+class _RecordingPublishRelaySession extends RelaySessionNotifier {
+  final publishedEvents = <NostrEvent>[];
+  int historyQueryCount = 0;
+
+  @override
+  SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  @override
+  Future<NostrEvent> publish(
+    NostrEvent event, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    publishedEvents.add(event);
+    return event;
+  }
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    historyQueryCount++;
+    return const [];
+  }
+}
 
 class _ConnectionAwareRelaySession extends RelaySessionNotifier {
   int historyQueryCount = 0;

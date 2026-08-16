@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc, Mutex,
+    Arc, Mutex, Weak,
 };
 
 use super::agent_voice::AgentVoiceSettings;
@@ -78,6 +78,12 @@ pub struct HuddleState {
     /// Active STT pipeline — not serialized, not cloned.
     #[serde(skip)]
     pub stt_pipeline: Option<Arc<stt::SttPipeline>>,
+    /// Weak STT handle shared with the audio receive loop so remote human
+    /// speech can reach transcription even when the pipeline hot-starts after
+    /// the Huddle audio socket was connected. The state-owned strong handle
+    /// above remains the sole owner and teardown clears both atomically.
+    #[serde(skip)]
+    pub remote_stt_pipeline: Arc<Mutex<Option<Weak<stt::SttPipeline>>>>,
     /// Active TTS pipeline — not serialized, not cloned.
     #[serde(skip)]
     pub tts_pipeline: Option<Arc<tts::TtsPipeline>>,
@@ -182,6 +188,7 @@ impl Clone for HuddleState {
             agent_pubkeys: Arc::new(Mutex::new(agent_pubkeys_snapshot)),
             agent_voice_settings: self.agent_voice_settings.clone(),
             stt_pipeline: None, // Never clone the pipeline handle.
+            remote_stt_pipeline: Arc::new(Mutex::new(None)),
             tts_pipeline: None, // Never clone the pipeline handle.
             is_creator: self.is_creator,
             tts_enabled: self.tts_enabled,
@@ -214,6 +221,7 @@ impl Default for HuddleState {
             agent_pubkeys: Arc::new(Mutex::new(Vec::new())),
             agent_voice_settings: BTreeMap::new(),
             stt_pipeline: None,
+            remote_stt_pipeline: Arc::new(Mutex::new(None)),
             tts_pipeline: None,
             is_creator: false,
             tts_enabled: true,
@@ -234,6 +242,22 @@ impl Default for HuddleState {
 }
 
 impl HuddleState {
+    pub(crate) fn set_stt_pipeline(&mut self, pipeline: Arc<stt::SttPipeline>) {
+        *self
+            .remote_stt_pipeline
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(Arc::downgrade(&pipeline));
+        self.stt_pipeline = Some(pipeline);
+    }
+
+    pub(crate) fn take_stt_pipeline(&mut self) -> Option<Arc<stt::SttPipeline>> {
+        self.remote_stt_pipeline
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        self.stt_pipeline.take()
+    }
+
     /// Begin a new local huddle lifetime and return its identity.
     pub(crate) fn begin_huddle_lifetime(&mut self) -> u64 {
         self.huddle_generation = self.huddle_generation.wrapping_add(1);

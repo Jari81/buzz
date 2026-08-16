@@ -6,19 +6,31 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 
 import '../theme/theme.dart';
 
-/// An iOS-native sheet surface that adopts the system's concentric corners on
-/// iOS 26 and newer. Other platforms keep the normal Flutter shape.
+enum ConcentricSurfaceCorners { all, bottom }
+
+/// An iOS-native surface that adopts the system's concentric corners on iOS 26
+/// and newer. Other platforms keep the normal Flutter shape.
 class ConcentricSheetSurface extends HookWidget {
   const ConcentricSheetSurface({
     required this.child,
     required this.enabled,
     this.color,
+    this.corners = ConcentricSurfaceCorners.all,
+    this.padding = const EdgeInsets.only(
+      left: Grid.xxs,
+      right: Grid.xxs,
+      bottom: Grid.xxs,
+    ),
+    this.providesSheetSurface = true,
     super.key,
   });
 
   final Widget child;
   final bool enabled;
   final Color? color;
+  final ConcentricSurfaceCorners corners;
+  final EdgeInsetsGeometry padding;
+  final bool providesSheetSurface;
 
   static bool providesSurfaceOf(BuildContext context) =>
       context
@@ -28,6 +40,13 @@ class ConcentricSheetSurface extends HookWidget {
 
   static const _surfaceChannel = MethodChannel('buzz/concentric_sheet_surface');
   static const _nativeContentClipRadius = Radii.dialog * 2;
+
+  BorderRadius _borderRadius(double radius) => switch (corners) {
+    ConcentricSurfaceCorners.all => BorderRadius.circular(radius),
+    ConcentricSurfaceCorners.bottom => BorderRadius.vertical(
+      bottom: Radius.circular(radius),
+    ),
+  };
 
   Future<bool> _checkNativeSurfaceSupport() async {
     try {
@@ -59,13 +78,10 @@ class ConcentricSheetSurface extends HookWidget {
     }
 
     final surfaceColor = color ?? context.colors.surface;
+    final fallbackBorderRadius = _borderRadius(Radii.dialog);
 
     return Padding(
-      padding: const EdgeInsets.only(
-        left: Grid.xxs,
-        right: Grid.xxs,
-        bottom: Grid.xxs,
-      ),
+      padding: padding,
       child: Stack(
         children: [
           if (nativeSurfaceSupported)
@@ -77,6 +93,7 @@ class ConcentricSheetSurface extends HookWidget {
                   creationParams: <String, Object>{
                     'color': surfaceColor.toARGB32(),
                     'minimumRadius': Radii.dialog,
+                    'corners': corners.name,
                   },
                   creationParamsCodec: const StandardMessageCodec(),
                 ),
@@ -86,7 +103,7 @@ class ConcentricSheetSurface extends HookWidget {
             Positioned.fill(
               child: Material(
                 color: surfaceColor,
-                borderRadius: BorderRadius.circular(Radii.dialog),
+                borderRadius: fallbackBorderRadius,
                 clipBehavior: Clip.antiAlias,
               ),
             ),
@@ -97,14 +114,16 @@ class ConcentricSheetSurface extends HookWidget {
             // the Flutter content inside that continuous outline; a 24pt
             // circular clip still lets scrolling rows show through the native
             // corner cutouts.
-            borderRadius: BorderRadius.circular(
+            borderRadius: _borderRadius(
               nativeSurfaceSupported ? _nativeContentClipRadius : Radii.dialog,
             ),
             clipBehavior: Clip.antiAlias,
-            child: _ConcentricSheetSurfaceScope(
-              providesSurface: true,
-              child: child,
-            ),
+            child: providesSheetSurface
+                ? _ConcentricSheetSurfaceScope(
+                    providesSurface: true,
+                    child: child,
+                  )
+                : child,
           ),
         ],
       ),

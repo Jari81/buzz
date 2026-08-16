@@ -80,6 +80,50 @@ void main() {
     },
   );
 
+  testWidgets(
+    'native surfaces can limit concentric clipping to bottom corners',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      const surfaceChannel = MethodChannel('buzz/concentric_sheet_surface');
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        surfaceChannel,
+        (call) async => call.method == 'isSupported' ? true : null,
+      );
+      try {
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: AppTheme.light(),
+            home: const ConcentricSheetSurface(
+              enabled: true,
+              color: Colors.red,
+              corners: ConcentricSurfaceCorners.bottom,
+              padding: EdgeInsets.zero,
+              providesSheetSurface: false,
+              child: SizedBox(height: 80, child: Text('App surface')),
+            ),
+          ),
+        );
+        await tester.pump();
+
+        final nativeSurface = tester.widget<UiKitView>(find.byType(UiKitView));
+        expect(nativeSurface.creationParams, containsPair('corners', 'bottom'));
+        final contentClip = tester.widget<ClipRSuperellipse>(
+          find.byKey(const ValueKey('concentric-sheet-content-clip')),
+        );
+        expect(
+          contentClip.borderRadius,
+          BorderRadius.vertical(bottom: Radius.circular(Radii.dialog * 2)),
+        );
+      } finally {
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          surfaceChannel,
+          null,
+        );
+        debugDefaultTargetPlatformOverride = null;
+      }
+    },
+  );
+
   testWidgets('native titled sheets leave the concentric surface unobscured', (
     tester,
   ) async {

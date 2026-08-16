@@ -13,6 +13,8 @@ import '../profile/profile_provider.dart';
 import 'channel.dart';
 import 'channels_provider.dart';
 
+part 'channel_huddle_actions.dart';
+
 String _relayErrorMessage(Object error) =>
     error.toString().replaceFirst('Exception: ', '');
 
