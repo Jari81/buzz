@@ -247,7 +247,7 @@ pub async fn flush_active_pending_events(
     flush_pending_events_at(&scope.db_path, state, &scope.relay_url, &scope.owner_keys).await
 }
 
-async fn flush_pending_events_at(
+pub(crate) async fn flush_pending_events_at(
     db_path: &std::path::Path,
     state: &AppState,
     relay_url: &str,

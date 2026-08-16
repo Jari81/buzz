@@ -86,6 +86,14 @@ use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 use tauri_plugin_window_state::StateFlags;
 #[cfg(target_os = "macos")]
 use tray_menu::show_main_window;
+/// Tiny executable-facing probe for release packaging smoke tests. Keeping the
+/// probe in the product crate makes it impossible for buzz-releases to validate
+/// a copied flag interpretation that has drifted from Desktop's command.
+#[doc(hidden)]
+pub fn print_agent_access_owner_only_probe_if_requested() -> bool {
+    commands::print_agent_access_owner_only_probe_if_requested()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // mesh-llm's async chains (model download, node start/join) overflow
