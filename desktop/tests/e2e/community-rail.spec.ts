@@ -82,7 +82,7 @@ test.describe("community rail", () => {
       "overflow",
       "visible",
     );
-    await expect(rail).toHaveCSS("z-index", "0");
+    await expect(rail).toHaveCSS("z-index", "20");
 
     const buttonA = page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`);
     const buttonB = page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`);
