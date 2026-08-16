@@ -62,13 +62,13 @@ async function createWorkflow(
   ).not.toBeVisible();
 }
 
-test("navigates to workflows view and shows empty state", async ({ page }) => {
+test("navigates to workflows view and shows the empty create tile", async ({
+  page,
+}) => {
   await navigateToWorkflows(page);
 
-  await expect(page.getByText("No workflows yet")).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Create your first workflow" }),
-  ).toBeVisible();
+  await expect(page.getByTestId("new-workflow-card")).toBeVisible();
+  await expect(page.locator('[data-testid^="workflow-card-"]')).toHaveCount(0);
 });
 
 test("creates a workflow via the form builder", async ({ page }) => {
@@ -121,6 +121,43 @@ test("captures disabled diff workflows in the list UI", async ({ page }) => {
   await expect(card).toContainText(description);
   await expect(card).toContainText("Diff Posted");
   await expect(card).toContainText("disabled");
+});
+
+test("enables and disables a workflow from its card menu", async ({ page }) => {
+  const workflowName = `toggle_workflow_${Date.now()}`;
+
+  await navigateToWorkflows(page);
+  await createWorkflow(page, workflowName);
+
+  const workflowCard = () =>
+    page
+      .locator('[data-testid^="workflow-card-"]')
+      .filter({ hasText: workflowName })
+      .first();
+  const workflowActions = () =>
+    workflowCard().getByRole("button", { name: "Workflow actions" });
+
+  const enableItem = page.getByRole("menuitemcheckbox", { name: "Enable" });
+
+  await page.getByRole("button", { name: `View ${workflowName}` }).click();
+  const detailPanel = page.getByTestId("workflow-detail-panel");
+  await expect(detailPanel).toBeVisible();
+  await expect(detailPanel.getByText("active", { exact: true })).toBeVisible();
+
+  await workflowActions().click();
+  await enableItem.click();
+  await expect(
+    workflowCard().getByText("disabled", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    detailPanel.getByText("disabled", { exact: true }),
+  ).toBeVisible();
+
+  await enableItem.click();
+  await expect(
+    workflowCard().getByText("active", { exact: true }),
+  ).toBeVisible();
+  await expect(detailPanel.getByText("active", { exact: true })).toBeVisible();
 });
 
 test("shows the webhook secret dialog after saving a webhook workflow", async ({
@@ -215,8 +252,9 @@ test("deletes a workflow with confirmation", async ({ page }) => {
   await page.getByRole("button", { name: "Delete" }).click();
   await expect(page.getByRole("alertdialog")).not.toBeVisible();
 
-  // Verify workflow is gone — back to empty state
-  await expect(page.getByText("No workflows yet")).toBeVisible();
+  // Verify workflow is gone — back to the empty create tile.
+  await expect(page.getByTestId("new-workflow-card")).toBeVisible();
+  await expect(page.locator('[data-testid^="workflow-card-"]')).toHaveCount(0);
 });
 
 test("triggers a workflow from the detail panel", async ({ page }) => {
