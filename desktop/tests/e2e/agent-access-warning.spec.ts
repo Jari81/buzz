@@ -51,6 +51,13 @@ test("open agent access explains the available access before save", async ({
     ],
   });
   await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.getByTestId("channel-members-trigger").click();
+  const accessBadge = page.getByTestId(
+    `sidebar-managed-agent-respond-to-${agent.pubkey}`,
+  );
+  await expect(accessBadge).toBeVisible();
+  await expect(accessBadge).toHaveText("Only me");
   await openAgentAccessDialog(page, agent.pubkey);
 
   const accessSelect = page.getByTestId("agent-respond-to-select");
@@ -93,6 +100,7 @@ test("open agent access explains the available access before save", async ({
       }, commandsBeforeSave),
     )
     .toBe(true);
+  await expect(accessBadge).toHaveText("Anyone");
 
   await openAgentAccessDialog(page, agent.pubkey);
   await expect(accessSelect).toHaveValue("anyone");

@@ -237,19 +237,33 @@ mod real_relay_tests {
 
     #[tokio::test]
     #[ignore]
-    async fn newly_retained_managed_policy_is_immediately_flushable_to_real_relay() {
+    async fn newly_retained_managed_policy_replaces_open_access_immediately_on_real_relay() {
         let owner = Keys::generate();
         let agent = Keys::generate();
         let state = state_for(owner.clone());
         let db_dir = tempfile::tempdir().unwrap();
         let db_path = db_dir.path().join("retention.sqlite3");
-        let content = serde_json::json!({
+        let initial_content = serde_json::json!({
             "name": "Immediate Policy Probe",
             "parallelism": 1,
             "respond_to": "anyone"
         })
         .to_string();
-        let event = EventBuilder::new(Kind::Custom(KIND_MANAGED_AGENT as u16), content)
+        let initial_event =
+            EventBuilder::new(Kind::Custom(KIND_MANAGED_AGENT as u16), initial_content)
+                .tags([Tag::parse(["d", &agent.public_key().to_hex()]).unwrap()])
+                .custom_created_at(nostr::Timestamp::from(
+                    nostr::Timestamp::now().as_secs().saturating_sub(1),
+                ));
+        publish(initial_event, &owner, &state).await;
+
+        let updated_content = serde_json::json!({
+            "name": "Immediate Policy Probe",
+            "parallelism": 1,
+            "respond_to": "owner-only"
+        })
+        .to_string();
+        let event = EventBuilder::new(Kind::Custom(KIND_MANAGED_AGENT as u16), updated_content)
             .tags([Tag::parse(["d", &agent.public_key().to_hex()]).unwrap()])
             .sign_with_keys(&owner)
             .unwrap();
@@ -297,6 +311,7 @@ mod real_relay_tests {
         .expect("query immediately flushed policy");
         assert_eq!(queried.len(), 1);
         assert_eq!(queried[0].id, event.id);
+        assert!(queried[0].content.contains("\"respond_to\":\"owner-only\""));
     }
 
     #[tokio::test]

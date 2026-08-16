@@ -989,30 +989,11 @@ pub async fn create_managed_agent(
     )
     .await)
         .err();
+    profile_sync_error =
+        super::agent_models::flush_managed_agent_policy(&app, &state, profile_sync_error).await;
 
-    // The managed policy was retained during the synchronous save above, but
-    // the background publisher runs only every 30 seconds. Discovery requires
-    // both this agent-signed profile and the owner-signed kind:30177 policy, so
-    // returning before the policy flush creates a deterministic cross-machine
-    // dead zone (and can leave a newly shared agent invisible until the next
-    // sweep). Publish the active retention scope now; failures remain durable
-    // and the background loop retries them.
-    if let Err(error) =
-        crate::managed_agents::persona_events::flush_active_pending_events(&app, &state).await
-    {
-        profile_sync_error = Some(match profile_sync_error {
-            Some(profile_error) => {
-                format!("{profile_error}; managed policy sync failed: {error}")
-            }
-            None => format!("managed policy sync failed: {error}"),
-        });
-    }
-
-    // ── Phase 5: provider deploy (async, outside lock) ───────────────────────
     let spawn_error = if input.spawn_after_create && input.backend != BackendKind::Local {
         if let BackendKind::Provider { ref id, ref config } = input.backend {
-            // Read the saved record to build the deploy payload (record has the
-            // canonical field values after Phase 3 normalization).
             let agent_json = {
                 let _g = state
                     .managed_agents_store_lock
