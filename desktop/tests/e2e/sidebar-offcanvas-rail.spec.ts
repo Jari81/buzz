@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
+import { waitForAnimations } from "../helpers/animations";
 
 const SHOTS = "test-results/sidebar-offcanvas-rail";
 const THEME_STORAGE_KEY = "buzz-theme";
@@ -20,7 +21,7 @@ const COMMUNITY_B = {
 };
 
 async function setup(page: Page, theme: string) {
-  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.setViewportSize({ width: 960, height: 540 });
   await page.addInitScript(
     ({ key, value }) => {
       window.localStorage.setItem(key, value);
@@ -52,15 +53,100 @@ for (const theme of ["buzz", "buzz-dark", "vesper"]) {
     page,
   }) => {
     await setup(page, theme);
+    await waitForAnimations(page);
     await page.screenshot({ path: `${SHOTS}/${theme}-expanded.png` });
 
+    const communityRail = page.getByTestId("community-rail");
+    const communityButton = page.getByTestId(
+      `community-rail-button-${COMMUNITY_B.id}`,
+    );
+    const railBoxBeforeCollapse = await communityRail.boundingBox();
+    expect(railBoxBeforeCollapse).not.toBeNull();
+
     await page.locator('[data-sidebar="trigger"]').first().click();
+
+    // Sample every rendered frame while the sidebar crosses the rail. The
+    // community list must remain the painted hit target without moving or
+    // fading at any point in the transition, while the sidebar content visibly
+    // recedes in place before the shell finishes closing.
+    const transitionFrames = await communityButton.evaluate(async (button) => {
+      const rail = button.closest('[data-testid="community-rail"]');
+      const sidebarContent = document.querySelector<HTMLElement>(
+        "[data-sidebar-transition-content]",
+      );
+      if (!(rail instanceof HTMLElement) || !sidebarContent) return [];
+
+      const frames: Array<{
+        elapsed: number;
+        hitRail: boolean;
+        opacity: string;
+        sidebarOpacity: number;
+        sidebarScale: string;
+        sidebarTranslateX: number;
+        visibility: string;
+        x: number;
+        y: number;
+      }> = [];
+      const startedAt = performance.now();
+      while (performance.now() - startedAt < 250) {
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() => resolve()),
+        );
+        const buttonBox = button.getBoundingClientRect();
+        const railBox = rail.getBoundingClientRect();
+        const hit = document.elementFromPoint(
+          buttonBox.x + buttonBox.width / 2,
+          buttonBox.y + buttonBox.height / 2,
+        );
+        const style = getComputedStyle(rail);
+        const sidebarStyle = getComputedStyle(sidebarContent);
+        frames.push({
+          elapsed: performance.now() - startedAt,
+          hitRail: hit === rail || rail.contains(hit),
+          opacity: style.opacity,
+          sidebarOpacity: Number.parseFloat(sidebarStyle.opacity),
+          sidebarScale: sidebarStyle.scale,
+          sidebarTranslateX: Number.parseFloat(sidebarStyle.translate),
+          visibility: style.visibility,
+          x: railBox.x,
+          y: railBox.y,
+        });
+      }
+      return frames;
+    });
+    expect(transitionFrames.length).toBeGreaterThan(1);
     const shell = page.locator(
       '[data-state="collapsed"][data-collapsible="offcanvas"]',
     );
     await expect(shell).toHaveCount(1);
+    expect(
+      transitionFrames.every(
+        (frame) =>
+          frame.hitRail &&
+          frame.opacity === "1" &&
+          frame.visibility === "visible" &&
+          frame.x === railBoxBeforeCollapse?.x &&
+          frame.y === railBoxBeforeCollapse?.y,
+      ),
+    ).toBe(true);
+    const midTransitionFrames = transitionFrames.filter(
+      (frame) =>
+        frame.sidebarOpacity > 0 &&
+        frame.sidebarOpacity < 1 &&
+        frame.sidebarScale !== "none" &&
+        frame.sidebarScale !== "0.95" &&
+        frame.sidebarTranslateX > 0 &&
+        frame.sidebarTranslateX < 24,
+    );
+    expect(midTransitionFrames.length).toBeGreaterThan(1);
+    expect(
+      transitionFrames.some(
+        (frame) => frame.elapsed >= 100 && frame.sidebarOpacity > 0.05,
+      ),
+    ).toBe(true);
+
     // Let the 200ms slide finish; visibility flips at the transition's end.
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(250);
 
     // Second direct child = the sliding sidebar container (first is the gap).
     const offscreenSidebar = shell.locator("> div").nth(1);
@@ -72,6 +158,7 @@ for (const theme of ["buzz", "buzz-dark", "vesper"]) {
     await expect(
       page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`),
     ).toBeVisible();
+    await waitForAnimations(page);
     await page.screenshot({ path: `${SHOTS}/${theme}-collapsed.png` });
   });
 }

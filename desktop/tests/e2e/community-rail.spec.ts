@@ -23,6 +23,24 @@ const COMMUNITY_B = {
   addedAt: "2026-01-02T00:00:00.000Z",
 };
 
+async function expectContentSurfaceHorizontalGutters(
+  page: import("@playwright/test").Page,
+) {
+  const [mainInsetBox, contentBox] = await Promise.all([
+    page.locator("[data-buzz-glass-inset]").boundingBox(),
+    page.locator("[data-buzz-content-surface]").first().boundingBox(),
+  ]);
+  expect(mainInsetBox).not.toBeNull();
+  expect(contentBox).not.toBeNull();
+  const leftGutter = (contentBox?.x ?? 0) - (mainInsetBox?.x ?? 0);
+  const rightGutter =
+    (mainInsetBox?.x ?? 0) +
+    (mainInsetBox?.width ?? 0) -
+    ((contentBox?.x ?? 0) + (contentBox?.width ?? 0));
+  expect(Math.abs(leftGutter - 1)).toBeLessThan(0.5);
+  expect(Math.abs(rightGutter - 8)).toBeLessThan(0.5);
+}
+
 async function seedCommunities(
   page: import("@playwright/test").Page,
   communities: Array<Record<string, unknown>>,
@@ -137,6 +155,7 @@ test.describe("community rail", () => {
 
     // The add-community affordance lives at the bottom of the rail.
     await expect(page.getByTestId("community-rail-add")).toBeVisible();
+    await expectContentSurfaceHorizontalGutters(page);
   });
 
   test("restores pointer events after dismissing community settings", async ({
@@ -1142,6 +1161,14 @@ test.describe("community rail", () => {
     // adds nothing).
     await expect(page.getByTestId("app-sidebar")).toBeVisible();
     await expect(page.getByTestId("community-rail")).toHaveCount(0);
+
+    await page
+      .getByRole("button", { name: "Toggle Sidebar", exact: true })
+      .click();
+    await expect(
+      page.locator('[data-side="left"][data-state="collapsed"]'),
+    ).toBeVisible();
+    await expectContentSurfaceHorizontalGutters(page);
   });
 
   test("keeps the rail visible when the sidebar is collapsed", async ({
@@ -1174,6 +1201,7 @@ test.describe("community rail", () => {
       page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`),
     ).toBeVisible();
     await expect(page.getByTestId("community-rail-add")).toBeVisible();
+    await expectContentSurfaceHorizontalGutters(page);
   });
 
   test("clears the macOS traffic lights", async ({ page }) => {
