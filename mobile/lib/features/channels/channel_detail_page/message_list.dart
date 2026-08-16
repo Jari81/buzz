@@ -516,6 +516,7 @@ class _MessageList extends HookConsumerWidget {
         entries.length,
         itemPositionsListener,
         appBarTitleContentHeight,
+        composerBottomInset,
       ],
     );
 

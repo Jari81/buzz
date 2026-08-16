@@ -6,12 +6,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
 
 /// Compact conversation control that returns a detached timeline to its tail.
-class JumpToLatestButton extends HookWidget {
+class JumpToLatestButton extends HookConsumerWidget {
   final VoidCallback onPressed;
 
   const JumpToLatestButton({required this.onPressed, super.key});
@@ -19,7 +20,7 @@ class JumpToLatestButton extends HookWidget {
   static const _iosViewType = 'buzz/jump_to_latest_glass';
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final nativeChannel = useState<MethodChannel?>(null);
     final onPressedRef = useRef(onPressed)..value = onPressed;
     final brightness = context.theme.brightness.name;

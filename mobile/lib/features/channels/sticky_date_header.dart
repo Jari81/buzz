@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/theme/theme.dart';
 
@@ -154,7 +155,7 @@ class StickyDateHeader extends StatelessWidget {
   }
 }
 
-class _IosStickyDateGlass extends HookWidget {
+class _IosStickyDateGlass extends HookConsumerWidget {
   final String label;
   final double width;
   final double height;
@@ -166,7 +167,7 @@ class _IosStickyDateGlass extends HookWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final nativeChannel = useState<MethodChannel?>(null);
     final brightness = context.theme.brightness.name;
 

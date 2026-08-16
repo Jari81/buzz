@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 void main() {
   testWidgets('updates the native iOS glass date and app theme', (
@@ -23,9 +24,11 @@ void main() {
     });
     try {
       await tester.pumpWidget(
-        MaterialApp(
-          theme: AppTheme.light(),
-          home: Scaffold(body: StickyDateHeader(state: state)),
+        ProviderScope(
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            home: Scaffold(body: StickyDateHeader(state: state)),
+          ),
         ),
       );
 
@@ -65,9 +68,11 @@ void main() {
 
       methodCalls.clear();
       await tester.pumpWidget(
-        MaterialApp(
-          theme: AppTheme.dark(),
-          home: Scaffold(body: StickyDateHeader(state: state)),
+        ProviderScope(
+          child: MaterialApp(
+            theme: AppTheme.dark(),
+            home: Scaffold(body: StickyDateHeader(state: state)),
+          ),
         ),
       );
       await tester.pumpAndSettle();
@@ -93,9 +98,11 @@ void main() {
     final state = ValueNotifier(const StickyDateHeaderState(label: 'Today'));
     try {
       await tester.pumpWidget(
-        MaterialApp(
-          theme: AppTheme.light(),
-          home: Scaffold(body: StickyDateHeader(state: state)),
+        ProviderScope(
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            home: Scaffold(body: StickyDateHeader(state: state)),
+          ),
         ),
       );
 

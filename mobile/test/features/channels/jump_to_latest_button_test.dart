@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 void main() {
   testWidgets('keeps the native iOS glass in sync with the app theme', (
@@ -20,9 +21,11 @@ void main() {
     });
     try {
       await tester.pumpWidget(
-        MaterialApp(
-          theme: AppTheme.light(),
-          home: Scaffold(body: JumpToLatestButton(onPressed: () {})),
+        ProviderScope(
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            home: Scaffold(body: JumpToLatestButton(onPressed: () {})),
+          ),
         ),
       );
 
@@ -47,9 +50,11 @@ void main() {
 
       methodCalls.clear();
       await tester.pumpWidget(
-        MaterialApp(
-          theme: AppTheme.dark(),
-          home: Scaffold(body: JumpToLatestButton(onPressed: () {})),
+        ProviderScope(
+          child: MaterialApp(
+            theme: AppTheme.dark(),
+            home: Scaffold(body: JumpToLatestButton(onPressed: () {})),
+          ),
         ),
       );
       await tester.pumpAndSettle();
