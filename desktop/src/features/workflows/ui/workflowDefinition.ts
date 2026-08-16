@@ -1,12 +1,118 @@
 import type { Workflow } from "@/shared/api/types";
-import { TRIGGER_LABELS } from "./workflowFormTypes";
-import type { TriggerType } from "./workflowFormTypes";
+import { ACTION_LABELS, TRIGGER_LABELS } from "./workflowFormTypes";
+import type { ActionType, TriggerType } from "./workflowFormTypes";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
   }
   return value as Record<string, unknown>;
+}
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : null;
+}
+
+function humanizeIdentifier(value: string): string {
+  return value.replaceAll("_", " ").replace(/\s+/g, " ").trim();
+}
+
+function getWorkflowSteps(
+  definition: Record<string, unknown>,
+): Record<string, unknown>[] {
+  return Array.isArray(definition.steps)
+    ? definition.steps.map(asRecord).filter((step) => step !== null)
+    : [];
+}
+
+export function getWorkflowTriggerType(
+  definition: Record<string, unknown>,
+): string | null {
+  return nonEmptyString(asRecord(definition.trigger)?.on);
+}
+
+export function getWorkflowPrimaryAction(
+  definition: Record<string, unknown>,
+): string | null {
+  return nonEmptyString(getWorkflowSteps(definition)[0]?.action);
+}
+
+function getTriggerCardClause(definition: Record<string, unknown>): string {
+  const trigger = asRecord(definition.trigger);
+  const triggerType = nonEmptyString(trigger?.on);
+  if (!trigger || !triggerType) return "When this workflow starts";
+
+  switch (triggerType) {
+    case "message_posted":
+      return nonEmptyString(trigger.filter)
+        ? "When a matching message is posted"
+        : "When a message is posted";
+    case "reaction_added": {
+      const emoji = nonEmptyString(trigger.emoji);
+      return emoji
+        ? `When someone reacts with ${emoji}`
+        : "When someone adds a reaction";
+    }
+    case "diff_posted":
+      return nonEmptyString(trigger.filter)
+        ? "When a matching diff is posted"
+        : "When a diff is posted";
+    case "webhook":
+      return "When a webhook arrives";
+    case "schedule":
+      return "On a schedule";
+    default:
+      return `When ${humanizeIdentifier(triggerType)} happens`;
+  }
+}
+
+function getActionCardClause(step: Record<string, unknown>): string | null {
+  const action = nonEmptyString(step.action);
+  if (!action) return null;
+
+  switch (action) {
+    case "delay": {
+      const duration = nonEmptyString(step.duration);
+      return duration ? `wait ${duration}` : "wait for a moment";
+    }
+    case "send_message":
+      return "send a channel message";
+    case "call_webhook":
+      return "call a webhook";
+    case "send_dm":
+      return "send a direct message";
+    case "request_approval":
+      return "request approval";
+    case "add_reaction": {
+      const emoji = nonEmptyString(step.emoji);
+      return emoji ? `add a ${emoji} reaction` : "add a reaction";
+    }
+    case "set_channel_topic":
+      return "update the channel topic";
+    default:
+      return (
+        ACTION_LABELS[action as ActionType] ?? humanizeIdentifier(action)
+      ).toLocaleLowerCase();
+  }
+}
+
+/** Build a short plain-language summary from a workflow trigger and steps. */
+export function getWorkflowCardLabel(
+  definition: Record<string, unknown>,
+): string {
+  const triggerClause = getTriggerCardClause(definition);
+  const steps = getWorkflowSteps(definition);
+  const firstAction = steps[0] ? getActionCardClause(steps[0]) : null;
+  if (!firstAction) return triggerClause;
+
+  const remainingStepCount = steps.length - 1;
+  if (remainingStepCount === 0) return `${triggerClause}, ${firstAction}`;
+
+  return `${triggerClause}, ${firstAction}, then ${remainingStepCount} more ${
+    remainingStepCount === 1 ? "step" : "steps"
+  }`;
 }
 
 export function getWorkflowEnabled(

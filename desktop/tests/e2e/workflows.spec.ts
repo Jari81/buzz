@@ -118,8 +118,8 @@ test("captures disabled diff workflows in the list UI", async ({ page }) => {
     .filter({ hasText: workflowName })
     .first();
   await expect(card).toContainText(workflowName);
-  await expect(card).toContainText(description);
   await expect(card).toContainText("Diff Posted");
+  await expect(card).toContainText("When a diff is posted, wait for a moment");
   await expect(card).toContainText("disabled");
 });
 
