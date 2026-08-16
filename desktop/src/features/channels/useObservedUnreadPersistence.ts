@@ -170,7 +170,9 @@ export function useObservedUnreadPersistence(
         revision: response.revision,
         sequence: response.ackedSequence,
       };
-      optionsRef.current.onPruned?.();
+      if (response.removed.length > 0 || response.upserts.length > 0) {
+        optionsRef.current.onPruned?.();
+      }
     },
     [reopen],
   );

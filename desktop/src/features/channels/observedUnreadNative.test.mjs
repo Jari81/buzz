@@ -52,6 +52,86 @@ async function settle() {
   });
 }
 
+test("native no-op marker delta does not notify the renderer", async () => {
+  installFreshStorage();
+  let harness;
+  let notifications = 0;
+  const rig = installNativeRig();
+  try {
+    harness = await mountHook(
+      {
+        ...DEFAULT_PROPS,
+        pubkey: "pk-no-op-marker",
+        getTs: () => NOW_S,
+        onPruned: () => {
+          notifications += 1;
+        },
+      },
+      makeRefs(),
+    );
+    await settle();
+    assert.equal(notifications, 1, "opening the native snapshot notifies once");
+
+    harness.api.syncMarkers(["channel-empty"]);
+    await settle();
+
+    assert.equal(
+      rig.requests("observed_unread_ingest").length,
+      1,
+      "the marker must still advance the native revision and ack sequence",
+    );
+    assert.equal(
+      notifications,
+      1,
+      "an empty projection delta must not trigger a renderer feedback render",
+    );
+  } finally {
+    await harness?.unmount();
+    rig.restore();
+  }
+});
+
+test("native snapshotRequired response still reopens and notifies", async () => {
+  installFreshStorage();
+  let harness;
+  let notifications = 0;
+  const scope = { pubkey: "pk-snapshot-required", relayUrl: RELAY };
+  const rig = installNativeRig();
+  try {
+    harness = await mountHook(
+      {
+        ...DEFAULT_PROPS,
+        pubkey: scope.pubkey,
+        getTs: () => NOW_S,
+        onPruned: () => {
+          notifications += 1;
+        },
+      },
+      makeRefs(),
+    );
+    await settle();
+    rig.scope(scope).lastSequence = -1;
+
+    harness.api.syncMarkers(["channel-gap"]);
+    await settle();
+    await settle();
+
+    assert.equal(
+      rig.requests("observed_unread_open_scope").length,
+      2,
+      "a sequence gap must reopen the scope even when it carries no projection rows",
+    );
+    assert.equal(
+      notifications,
+      2,
+      "the replacement snapshot must still notify the renderer",
+    );
+  } finally {
+    await harness?.unmount();
+    rig.restore();
+  }
+});
+
 // ── Entry: the boundary that makes every other test meaningful ────────────────
 
 test("native mode is ENTERED: the hook opens the scope over the bridge", async () => {
