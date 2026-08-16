@@ -21,7 +21,7 @@ fn provider_record(deployed: bool) -> ManagedAgentRecord {
 fn deployed_provider_rejects_access_edits_that_cannot_be_revoked() {
     let error = ensure_access_policy_change_supported(&provider_record(true), true)
         .expect_err("deployed provider access edit must fail closed");
-    assert!(error.contains("cannot revoke"));
+    assert!(error.contains("no explicit stop or revocation acknowledgement"));
 }
 
 #[test]

@@ -110,7 +110,7 @@ pub(crate) async fn reconcile_on_workspace_apply(
     Ok(())
 }
 
-fn persist_failure(
+pub(crate) fn persist_failure(
     app: &AppHandle,
     state: &AppState,
     pubkey: &str,

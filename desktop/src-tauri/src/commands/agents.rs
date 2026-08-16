@@ -445,8 +445,10 @@ pub(super) async fn start_local_agent_with_preflight(
 /// spawn_blocking, and persists the result (backend_agent_id or last_error).
 ///
 /// Idempotency: calling deploy on an already-deployed agent sends the same payload
-/// again. Providers are expected to handle this as an update-in-place or no-op —
-/// the protocol does not include an explicit `undeploy` operation (deferred to v2).
+/// again. Providers are expected to handle this as an update-in-place or no-op.
+/// The protocol has no explicit `undeploy` operation or acknowledgement that an
+/// existing process stopped, so a successful redeploy delegates access-policy
+/// revocation semantics to the provider implementation (deferred to v2).
 ///
 /// Returns Ok(()) on success, Err(message) on failure. Either way the record is
 /// updated and saved before returning.

@@ -20,7 +20,7 @@ fn ensure_access_policy_change_supported(
         && record.backend_agent_id.is_some()
     {
         return Err(
-            "Access cannot be changed while this provider-backed agent is deployed because the provider protocol cannot revoke the running deployment safely. Stop or recreate the provider agent first."
+            "Access cannot be changed while this provider-backed agent is deployed because the provider protocol has no explicit stop or revocation acknowledgement. Stop or recreate the provider agent first."
                 .to_string(),
         );
     }
@@ -360,7 +360,9 @@ pub async fn update_managed_agent(
                 .await
                 {
                     Ok(_) => String::new(),
-                    Err(error) => format!(" The previous runtime also failed to restart: {error}"),
+                    Err(error) => format!(
+                        " The runtime also failed to restart with the kept access policy: {error}"
+                    ),
                 }
             };
             let rollback_message = if access_policy_changed {

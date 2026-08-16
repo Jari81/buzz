@@ -103,11 +103,19 @@ pub async fn reconcile_inbound_persona_event(
             agent_json,
         }) => {
             let state = app.state::<AppState>();
-            let agent_json = agent_json.map_err(|error| {
-                format!(
-                    "Inbound agent access was saved, but its provider deployment could not be refreshed safely: {error}"
-                )
-            })?;
+            let agent_json = match agent_json {
+                Ok(agent_json) => agent_json,
+                Err(error) => {
+                    let message = format!(
+                        "Inbound agent access was saved, but its provider deployment could not be refreshed safely: {error}"
+                    );
+                    super::super::agents::provider_access::persist_failure(
+                        &app, &state, &pubkey, &message,
+                    )?;
+                    let _ = app.emit("agents-data-changed", ());
+                    return Err(message);
+                }
+            };
             super::super::agents::deploy_to_provider(
                 &app,
                 &state,
