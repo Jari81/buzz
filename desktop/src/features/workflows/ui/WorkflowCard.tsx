@@ -19,7 +19,7 @@ import type { Workflow } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { WorkflowActionsMenu } from "./WorkflowActionsMenu";
 import {
-  getWorkflowCardLabel,
+  getWorkflowDescription,
   getWorkflowDisplayStatus,
   getWorkflowEnabled,
   getWorkflowPrimaryAction,
@@ -93,7 +93,7 @@ export function WorkflowCard({
 }: WorkflowCardProps) {
   const displayStatus = getWorkflowDisplayStatus(workflow);
   const triggerSummary = getWorkflowTriggerSummary(workflow.definition);
-  const cardLabel = getWorkflowCardLabel(workflow.definition);
+  const description = getWorkflowDescription(workflow.definition);
   const triggerType = getWorkflowTriggerType(workflow.definition);
   const actionType = getWorkflowPrimaryAction(workflow.definition);
   const TriggerIcon = triggerType ? TRIGGER_ICONS[triggerType] : undefined;
@@ -161,15 +161,17 @@ export function WorkflowCard({
           </p>
         ) : null}
         <h3 className="mt-1 line-clamp-4 text-xl font-bold leading-tight tracking-tight">
-          {cardLabel}
+          {description ?? workflow.name}
         </h3>
 
         <div className="mt-auto flex min-w-0 items-end justify-between gap-3 pt-5 text-muted-foreground">
           <div className="min-w-0">
-            <p className="truncate text-xs font-semibold text-foreground">
-              {workflow.name}
-            </p>
-            <p className="mt-0.5 truncate text-2xs">
+            {description ? (
+              <p className="truncate text-xs font-semibold text-foreground">
+                {workflow.name}
+              </p>
+            ) : null}
+            <p className={cn("truncate text-2xs", description && "mt-0.5")}>
               {channelName ? `#${channelName}` : "Channel workflow"}
             </p>
           </div>

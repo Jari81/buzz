@@ -2,37 +2,25 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  getWorkflowCardLabel,
   getWorkflowDisplayStatus,
+  getWorkflowPrimaryAction,
+  getWorkflowTriggerType,
   withWorkflowEnabled,
 } from "./workflowDefinition.ts";
 
-test("builds restrained plain-language workflow card labels", () => {
+test("reads only direct trigger and first-action types for card icons", () => {
   assert.equal(
-    getWorkflowCardLabel({
-      trigger: { on: "message_posted" },
-      steps: [{ action: "send_message", text: "Deploying now" }],
-    }),
-    "When a message is posted, send a channel message",
+    getWorkflowTriggerType({ trigger: { on: "message_posted" } }),
+    "message_posted",
   );
   assert.equal(
-    getWorkflowCardLabel({
-      trigger: { on: "reaction_added", emoji: "🔥" },
-      steps: [
-        { action: "delay", duration: "5m" },
-        { action: "add_reaction", emoji: "✅" },
-      ],
+    getWorkflowPrimaryAction({
+      steps: [{ action: "send_message" }, { action: "delay" }],
     }),
-    "When someone reacts with 🔥, wait 5m, then 1 more step",
+    "send_message",
   );
-  assert.equal(
-    getWorkflowCardLabel({
-      trigger: { on: "schedule", cron: "30 9 * * *" },
-      steps: [{ action: "call_webhook" }],
-    }),
-    "On a schedule, call a webhook",
-  );
-  assert.equal(getWorkflowCardLabel({}), "When this workflow starts");
+  assert.equal(getWorkflowTriggerType({ trigger: { on: "" } }), null);
+  assert.equal(getWorkflowPrimaryAction({ steps: [null] }), null);
 });
 
 test("updates enabled state without mutating the workflow definition", () => {
