@@ -31,6 +31,9 @@ final class HuddleSessionState {
   final String? startedEventId;
   final String? currentPubkey;
   final bool isCreator;
+
+  /// Whether the audio relay admitted this identity during this session.
+  final bool wasAdmitted;
   final bool isMuted;
   final bool isSpeakerEnabled;
   final int participantCount;
@@ -49,6 +52,7 @@ final class HuddleSessionState {
     this.startedEventId,
     this.currentPubkey,
     this.isCreator = false,
+    this.wasAdmitted = false,
     this.isMuted = false,
     this.isSpeakerEnabled = false,
     this.participantCount = 0,
@@ -64,6 +68,7 @@ final class HuddleSessionState {
   static const idle = HuddleSessionState(phase: HuddleSessionPhase.idle);
 
   bool get isConnected => phase == HuddleSessionPhase.connected;
+
   bool get isInSession => switch (phase) {
     HuddleSessionPhase.checkingSupport ||
     HuddleSessionPhase.requestingPermission ||
@@ -83,6 +88,7 @@ final class HuddleSessionState {
     Object? startedEventId = _notProvided,
     Object? currentPubkey = _notProvided,
     bool? isCreator,
+    bool? wasAdmitted,
     bool? isMuted,
     bool? isSpeakerEnabled,
     int? participantCount,
@@ -108,6 +114,7 @@ final class HuddleSessionState {
         ? this.currentPubkey
         : currentPubkey as String?,
     isCreator: isCreator ?? this.isCreator,
+    wasAdmitted: wasAdmitted ?? this.wasAdmitted,
     isMuted: isMuted ?? this.isMuted,
     isSpeakerEnabled: isSpeakerEnabled ?? this.isSpeakerEnabled,
     participantCount: participantCount ?? this.participantCount,
@@ -274,6 +281,7 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
             : HuddleSessionPhase.connected,
         isMuted: media.state.isMuted,
         isSpeakerEnabled: media.state.isSpeakerEnabled,
+        wasAdmitted: true,
         participantCount: transport.state.peers.length,
         participantPubkeys: _participantPubkeys(transport.state),
         reconnectAttempt: 0,
@@ -397,6 +405,7 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
           phase: media.state.isInterrupted
               ? HuddleSessionPhase.interrupted
               : HuddleSessionPhase.connected,
+          wasAdmitted: true,
           participantCount: transportState.peers.length,
           participantPubkeys: _participantPubkeys(transportState),
           reconnectAttempt: 0,

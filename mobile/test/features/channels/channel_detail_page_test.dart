@@ -3374,6 +3374,48 @@ void main() {
       expect(find.byIcon(LucideIcons.headphoneOff), findsNothing);
     });
 
+    testWidgets('failed admission cannot publish Huddle leave lifecycle', (
+      tester,
+    ) async {
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final relaySession = _ReconnectingRelaySession();
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _huddleMsg(
+              id: 'unavailable-huddle',
+              kind: EventKind.huddleStarted,
+              pubkey: 'desktop',
+              createdAt: now,
+            ),
+          ],
+          users: const {
+            'desktop': UserProfile(pubkey: 'desktop'),
+            'self': UserProfile(pubkey: 'self'),
+          },
+          relayConfigNotifier: _HuddleRelayConfigNotifier(),
+          relaySessionNotifier: relaySession,
+          huddleCurrentPubkey: 'self',
+          huddleMediaFactory: _HuddleTestMedia.new,
+          huddleTransportFactory: (_) => _HuddleTestTransport(
+            connectError: const HuddleTransportError(
+              code: HuddleTransportErrorCode.relayRejected,
+              message: 'not a member',
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Join'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('huddle-leave')));
+      await tester.pumpAndSettle();
+
+      expect(relaySession.publishedKinds, isEmpty);
+    });
+
     testWidgets(
       'opens the sparse full-screen call with avatar and audio controls',
       (tester) async {
@@ -3567,6 +3609,20 @@ void main() {
             matching: find.byType(IconButton),
           ),
         );
+        expect(
+          tester
+              .widget<Semantics>(
+                find
+                    .descendant(
+                      of: find.byKey(const ValueKey('huddle-speaker-toggle')),
+                      matching: find.byType(Semantics),
+                    )
+                    .first,
+              )
+              .properties
+              .toggled,
+          isFalse,
+        );
         final inactiveSpeakerFill = inactiveSpeakerButton.style?.backgroundColor
             ?.resolve(const <WidgetState>{});
         await tester.tap(find.byKey(const ValueKey('huddle-speaker-toggle')));
@@ -3589,6 +3645,20 @@ void main() {
             const <WidgetState>{},
           ),
           isNot(inactiveSpeakerFill),
+        );
+        expect(
+          tester
+              .widget<Semantics>(
+                find
+                    .descendant(
+                      of: find.byKey(const ValueKey('huddle-speaker-toggle')),
+                      matching: find.byType(Semantics),
+                    )
+                    .first,
+              )
+              .properties
+              .toggled,
+          isTrue,
         );
 
         expect(
@@ -3617,6 +3687,20 @@ void main() {
             matching: find.byIcon(LucideIcons.micOff),
           ),
           findsOneWidget,
+        );
+        expect(
+          tester
+              .widget<Semantics>(
+                find
+                    .descendant(
+                      of: find.byKey(const ValueKey('huddle-mute-toggle')),
+                      matching: find.byType(Semantics),
+                    )
+                    .first,
+              )
+              .properties
+              .toggled,
+          isTrue,
         );
 
         await tester.tap(find.byKey(const ValueKey('huddle-minimize')));

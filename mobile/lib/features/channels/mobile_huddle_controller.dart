@@ -167,7 +167,7 @@ final class MobileHuddleController extends Notifier<bool> {
     final session = ref.read(huddleSessionProvider);
     final parentChannelId = session.parentChannelId;
     final backingChannelId = session.ephemeralChannelId;
-    final humanCount = backingChannelId == null
+    final humanCount = !session.wasAdmitted || backingChannelId == null
         ? null
         : ref
               .read(huddleHumanCountProvider)(backingChannelId)

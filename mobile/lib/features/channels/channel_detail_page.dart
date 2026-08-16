@@ -69,6 +69,8 @@ part 'channel_detail_page/message_list.dart';
 part 'channel_detail_page/system_rows.dart';
 part 'channel_detail_page/huddle_sheet.dart';
 part 'channel_detail_page/huddle_call_avatar.dart';
+part 'channel_detail_page/huddle_call_participants.dart';
+part 'channel_detail_page/huddle_call_controls.dart';
 part 'channel_detail_page/huddle_drawer.dart';
 part 'channel_detail_page/message_bubble.dart';
 part 'channel_detail_page/banners.dart';

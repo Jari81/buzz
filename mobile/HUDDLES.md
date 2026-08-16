@@ -3,7 +3,7 @@
 This foreground-only product slice preserves the existing Desktop/relay
 contract. Android and iOS clients can start a human Huddle, open a recent
 Desktop-started Huddle card, join with the microphone on, hear multiple remote
-participants, send microphone audio, mute, leave, or (as creator) end the room.
+participants, send microphone audio, mute, and leave.
 
 The parent channel carries creator-signed kind `48100` start and `48103` end
 events. The private `stream` backing channel uses kind `9007`, `ttl=3600`, and
@@ -13,8 +13,9 @@ rule: it counts non-`bot` backing-channel members before disconnecting, submits
 kind `9022` when another human remains, and otherwise publishes kind `48103`
 and archives with kind `9002`. A failed count safely assumes another human is
 present so a transient relay error cannot end the Huddle. Creator-only explicit
-“End for everyone” remains a separate action. On relaunch, parent event history
-reconstructs the visible card without silently reopening a microphone.
+end support remains in the controller, but the current mobile UI does not
+foreground a separate “End for everyone” control. On relaunch, parent event
+history reconstructs the visible card without silently reopening a microphone.
 
 ## Control plane
 

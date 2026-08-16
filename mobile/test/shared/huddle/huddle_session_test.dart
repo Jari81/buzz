@@ -161,8 +161,39 @@ void main() {
     final state = container.read(huddleSessionProvider);
     expect(state.phase, HuddleSessionPhase.failed);
     expect(state.error, contains('Microphone permission'));
+    expect(state.wasAdmitted, isFalse);
     expect(transport.connectCalls, 0);
   });
+
+  test(
+    'retains admission evidence after an established transport fails',
+    () async {
+      final media = _FakeMedia();
+      final transport = _FakeTransport();
+      final container = ProviderContainer(
+        overrides: [
+          huddleMediaFactoryProvider.overrideWithValue(() => media),
+          huddleTransportFactoryProvider.overrideWithValue((_) => transport),
+          huddleReconnectDelaysProvider.overrideWithValue(const []),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container
+          .read(huddleSessionProvider.notifier)
+          .join(_parameters(), currentPubkey: 'mobile');
+      expect(container.read(huddleSessionProvider).wasAdmitted, isTrue);
+
+      transport.emitUnexpectedFailure();
+      await _waitUntil(
+        () =>
+            container.read(huddleSessionProvider).phase ==
+            HuddleSessionPhase.failed,
+      );
+
+      expect(container.read(huddleSessionProvider).wasAdmitted, isTrue);
+    },
+  );
 }
 
 HuddleConnectionParameters _parameters() => HuddleConnectionParameters(

@@ -4,12 +4,6 @@ const _mobileHuddleDrawerBaseHeight = 80.0;
 const _mobileHuddleDrawerRadius = 24.0;
 const _mobileHuddleDrawerMotion = Duration(milliseconds: 260);
 const _mobileHuddleDrawerCurve = Cubic(0.32, 0.72, 0, 1);
-const _lightHuddleDrawerSurface = Color(0xFF000000);
-const _lightHuddleControlSurface = Color(0xFF333333);
-const _lightHuddleForeground = Color(0xFFFAFAFA);
-const _darkHuddleDrawerSurface = Color(0xFF363A4F);
-const _darkHuddleControlSurface = Color(0xFF494D64);
-const _darkHuddleForeground = Color(0xFFCAD3F5);
 
 /// Lifts the mobile app above a persistent Huddle control drawer when the
 /// full-screen call has been minimized.
@@ -65,9 +59,9 @@ class MobileHuddleShell extends ConsumerWidget {
                   ),
                 ),
                 boxShadow: drawerOpen
-                    ? const [
+                    ? [
                         BoxShadow(
-                          color: Color(0x70000000),
+                          color: context.colors.shadow.withValues(alpha: 0.44),
                           blurRadius: 24,
                           spreadRadius: -12,
                           offset: Offset(0, 10),
@@ -226,6 +220,7 @@ class _MobileHuddleDrawer extends ConsumerWidget {
                         backgroundColor: session.isSpeakerEnabled
                             ? foreground
                             : controlSurface,
+                        toggled: session.isSpeakerEnabled,
                         onPressed: () => unawaited(
                           sessionController.setSpeakerEnabled(
                             !session.isSpeakerEnabled,
@@ -246,6 +241,7 @@ class _MobileHuddleDrawer extends ConsumerWidget {
                         backgroundColor: session.isMuted
                             ? controlSurface
                             : foreground,
+                        toggled: session.isMuted,
                         onPressed: () => unawaited(
                           sessionController.setMuted(!session.isMuted),
                         ),
@@ -272,16 +268,10 @@ class _MobileHuddleDrawer extends ConsumerWidget {
 }
 
 Color _huddleDrawerSurface(BuildContext context) =>
-    Theme.of(context).brightness == Brightness.dark
-    ? _darkHuddleDrawerSurface
-    : _lightHuddleDrawerSurface;
+    context.appColors.huddleDrawerSurface;
 
 Color _huddleDrawerControlSurface(BuildContext context) =>
-    Theme.of(context).brightness == Brightness.dark
-    ? _darkHuddleControlSurface
-    : _lightHuddleControlSurface;
+    context.appColors.huddleControlSurface;
 
 Color _huddleDrawerForeground(BuildContext context) =>
-    Theme.of(context).brightness == Brightness.dark
-    ? _darkHuddleForeground
-    : _lightHuddleForeground;
+    context.appColors.onHuddleDrawer;
