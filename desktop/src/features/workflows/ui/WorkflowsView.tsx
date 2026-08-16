@@ -43,7 +43,7 @@ type DialogState =
   | { mode: "duplicate"; workflow: Workflow };
 
 const WORKFLOW_CARD_GRID_CLASS =
-  "grid grid-cols-1 gap-3 [@container(min-width:42rem)]:grid-cols-2 [@container(min-width:63rem)]:grid-cols-3";
+  "grid grid-cols-1 gap-3 [@container(min-width:38rem)]:grid-cols-2 [@container(min-width:54rem)]:grid-cols-3";
 
 function WorkflowsListSkeleton() {
   return (

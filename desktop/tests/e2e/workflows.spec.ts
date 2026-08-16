@@ -99,6 +99,49 @@ test("disables autocapitalization in the workflow form", async ({ page }) => {
   );
 });
 
+test("captures workflow library across responsive viewports", async ({
+  page,
+}) => {
+  await navigateToWorkflows(page);
+  await createWorkflow(page, "Notify reviewers when source files change", {
+    description: "Watches diff events for src/ changes",
+    enabled: false,
+    trigger: "diff_posted",
+  });
+  await createWorkflow(page, "Post the daily standup reminder to the team", {
+    description: "Keeps the team aligned every morning",
+    trigger: "schedule",
+  });
+  await createWorkflow(
+    page,
+    "Request approval before deploying to production",
+    {
+      description: "Requires a final review before release",
+      trigger: "reaction_added",
+    },
+  );
+
+  for (const viewport of [
+    { width: 800, height: 720, name: "narrow" },
+    { width: 1024, height: 720, name: "medium" },
+    { width: 1280, height: 720, name: "wide" },
+  ]) {
+    await page.setViewportSize(viewport);
+    await page.screenshot({
+      animations: "disabled",
+      path: `test-results/workflow-library-${viewport.name}.png`,
+    });
+  }
+
+  await page.setViewportSize({ width: 1280, height: 720 });
+  const firstCard = page.locator('[data-testid^="workflow-card-"]').first();
+  await firstCard.getByRole("button", { name: "Workflow actions" }).click();
+  await page.screenshot({
+    animations: "disabled",
+    path: "test-results/workflow-library-wide-actions.png",
+  });
+});
+
 test("captures disabled diff workflows in the list UI", async ({ page }) => {
   const workflowName = `diff_workflow_${Date.now()}`;
   const description = "Watches diff events for src/ changes";
@@ -117,9 +160,9 @@ test("captures disabled diff workflows in the list UI", async ({ page }) => {
     .locator('[data-testid^="workflow-card-"]')
     .filter({ hasText: workflowName })
     .first();
-  await expect(card).toContainText(workflowName);
-  await expect(card).toContainText("Diff Posted");
-  await expect(card).toContainText(description);
+  await expect(card.getByText("Diff Posted", { exact: true })).toBeVisible();
+  await expect(card.locator("h3")).toHaveText(workflowName);
+  await expect(card.getByText(description, { exact: true })).toBeVisible();
   await expect(card).toContainText("disabled");
 });
 

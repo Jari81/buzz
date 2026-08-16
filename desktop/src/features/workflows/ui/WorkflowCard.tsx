@@ -2,7 +2,6 @@ import {
   ArrowRight,
   CalendarClock,
   CircleCheckBig,
-  Clock3,
   GitPullRequest,
   Hash,
   MessageCircle,
@@ -156,27 +155,24 @@ export function WorkflowCard({
         </div>
 
         {triggerSummary ? (
-          <p className="mt-4 line-clamp-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          <p className="mt-4 line-clamp-1 text-xs font-semibold text-muted-foreground">
             {triggerSummary}
           </p>
         ) : null}
-        <h3 className="mt-1 line-clamp-4 text-xl font-bold leading-tight tracking-tight">
-          {description ?? workflow.name}
+        <h3 className="mt-1 line-clamp-2 text-xl font-bold leading-tight tracking-tight">
+          {workflow.name}
         </h3>
+        {description ? (
+          <p className="mt-2 line-clamp-2 text-sm leading-relaxed text-muted-foreground">
+            {description}
+          </p>
+        ) : null}
 
         <div className="mt-auto flex min-w-0 items-end justify-between gap-3 pt-5 text-muted-foreground">
-          <div className="min-w-0">
-            {description ? (
-              <p className="truncate text-xs font-semibold text-foreground">
-                {workflow.name}
-              </p>
-            ) : null}
-            <p className={cn("truncate text-2xs", description && "mt-0.5")}>
-              {channelName ? `#${channelName}` : "Channel workflow"}
-            </p>
-          </div>
-          <span className="flex shrink-0 items-center gap-1 text-2xs">
-            <Clock3 className="h-3.5 w-3.5" />
+          <p className="min-w-0 truncate text-2xs">
+            {channelName ? `#${channelName}` : "Channel workflow"}
+          </p>
+          <span className="shrink-0 text-2xs">
             {new Date(workflow.updatedAt * 1000).toLocaleDateString()}
           </span>
         </div>
