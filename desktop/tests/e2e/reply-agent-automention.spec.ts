@@ -14,6 +14,7 @@ type CommandPayloadWindow = Window & {
   __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
     channelName: string;
     content: string;
+    parentEventId?: string | null;
     pubkey?: string;
   }) => { id: string };
 };
@@ -38,15 +39,21 @@ async function openGeneral(page: Page) {
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 }
 
-async function emitRootMessage(page: Page, content: string, pubkey?: string) {
+async function emitMessage(
+  page: Page,
+  content: string,
+  pubkey?: string,
+  parentEventId?: string | null,
+) {
   const event = await page.evaluate(
-    ({ message, author }) =>
+    ({ message, author, parent }) =>
       (window as CommandPayloadWindow).__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: "general",
         content: message,
+        parentEventId: parent,
         pubkey: author,
       }),
-    { message: content, author: pubkey },
+    { message: content, author: pubkey, parent: parentEventId },
   );
   if (!event) throw new Error("Mock message emitter is not installed");
   return event;
@@ -79,7 +86,7 @@ test("replying to an agent's thread auto-inserts a removable mention chip", asyn
 }) => {
   await installAgentFixtures(page);
   await openGeneral(page);
-  const root = await emitRootMessage(page, "@Fulki 2", AGENT);
+  const root = await emitMessage(page, "@Fulki 2", AGENT);
 
   await openThread(page, root.id);
 
@@ -106,7 +113,7 @@ test("removing the chip opts out and it is not re-inserted", async ({
 }) => {
   await installAgentFixtures(page);
   await openGeneral(page);
-  const root = await emitRootMessage(page, "@Fulki 2", AGENT);
+  const root = await emitMessage(page, "@Fulki 2", AGENT);
 
   await openThread(page, root.id);
 
@@ -133,7 +140,7 @@ test("removing the chip opts out and it is not re-inserted", async ({
 test("human-authored thread roots get no auto-mention", async ({ page }) => {
   await installAgentFixtures(page);
   await openGeneral(page);
-  const root = await emitRootMessage(page, "lunch plans?", HUMAN);
+  const root = await emitMessage(page, "lunch plans?", HUMAN);
 
   await openThread(page, root.id);
 
@@ -142,4 +149,43 @@ test("human-authored thread roots get no auto-mention", async ({ page }) => {
   // asserting the composer stayed empty.
   await page.waitForTimeout(250);
   await expect(input).toHaveText("");
+});
+
+test("Reply on an agent message inside a human thread targets that agent", async ({
+  page,
+}) => {
+  await installAgentFixtures(page);
+  await openGeneral(page);
+  const root = await emitMessage(page, "human thread root", HUMAN);
+  const agentReply = await emitMessage(
+    page,
+    "agent answer inside the thread",
+    AGENT,
+    root.id,
+  );
+
+  await openThread(page, root.id);
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const agentReplyRow = threadPanel.locator(
+    `[data-message-id="${agentReply.id}"]`,
+  );
+  await expect(agentReplyRow).toBeVisible();
+  await agentReplyRow.hover();
+  await agentReplyRow.getByRole("button", { name: "Reply" }).click();
+
+  const input = threadInput(page);
+  await expect(input).toHaveText("@Morgarita ");
+  await expect(input.locator(".agent-mention-highlight")).toHaveCount(1);
+  await input.click();
+  await page.keyboard.press("End");
+  await input.pressSequentially("follow-up");
+  await input.press("Enter");
+
+  await expect
+    .poll(async () => {
+      const sends = await sentChannelMessages(page);
+      return sends.at(-1)?.mentionPubkeys ?? null;
+    })
+    .toContain(AGENT);
 });
