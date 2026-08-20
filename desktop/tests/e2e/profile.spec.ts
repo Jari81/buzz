@@ -2392,7 +2392,14 @@ test("Windows boot-time recovery prevents false-denied from disabling persisted 
     if (pubkey) {
       window.localStorage.setItem(
         `buzz-notification-settings.v2:${pubkey}`,
-        JSON.stringify({ desktopEnabled: true, homeBadgeEnabled: true, notifyWhileViewing: false, sounds: {}, slotAlertsEnabled: {}, slotAlertsSnapshot: null }),
+        JSON.stringify({
+          desktopEnabled: true,
+          homeBadgeEnabled: true,
+          notifyWhileViewing: false,
+          sounds: {},
+          slotAlertsEnabled: {},
+          slotAlertsSnapshot: null,
+        }),
       );
     }
     (
