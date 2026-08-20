@@ -38,6 +38,7 @@ import { useFocusDrawerPresence } from "@/features/channels/ui/useFocusDrawerPre
 import { useChannelWorkingAgentPubkeys } from "@/features/agents/agentWorkingSignal";
 import { useCardMintJobs } from "@/features/agents/cardMintStore";
 import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar";
+import { mergeThreadComposerActivityPubkeys } from "@/features/channels/ui/channelComposerActivityMerge";
 import { ChannelComposerActivityAccessory } from "@/features/channels/ui/ChannelComposerActivityAccessory";
 import {
   containsWelcomePersonaMention,
@@ -365,16 +366,16 @@ export const ChannelPane = React.memo(function ChannelPane({
     hasComposerBotActivity || hasTypingActivity || hasCardMintActivity;
   const threadComposerBotTypingPubkeys = React.useMemo(() => {
     if (!openThreadHeadId) return [];
-    return botTypingEntries
+    const threadTyping = botTypingEntries
       .filter((entry) => entry.threadHeadId === openThreadHeadId)
-      .map((entry) => entry.pubkey)
-      .filter(
-        (pubkey, index, all) =>
-          all.findIndex(
-            (candidate) => candidate.toLowerCase() === pubkey.toLowerCase(),
-          ) === index,
-      );
-  }, [botTypingEntries, openThreadHeadId]);
+      .map((entry) => entry.pubkey);
+    // BUZZ-DESKTOP-003: merge the channel-level working set so threads
+    // render the activity bar, not only "is typing".
+    return mergeThreadComposerActivityPubkeys(
+      threadTyping,
+      composerWorkingBotPubkeys,
+    );
+  }, [botTypingEntries, composerWorkingBotPubkeys, openThreadHeadId]);
   const hasThreadComposerBotActivity =
     threadComposerBotTypingPubkeys.length > 0;
   const directMessageIntro = React.useMemo(

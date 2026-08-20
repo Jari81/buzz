@@ -132,6 +132,17 @@ export function getChannelAgentSessionAgents({
       )
     : null;
 
+  // BUZZ-DESKTOP-003: DM channels never appear in a relay agent's declared
+  // channel_ids (kind:10100 profiles declare public channels only), so the
+  // declared-scope filter dropped every relay agent inside its own DM and
+  // the composer activity bar stayed empty even while observer frames were
+  // arriving (the sidebar working badge proved it). For DMs the channel's
+  // participantPubkeys are the authoritative membership signal instead.
+  const dmParticipantPubkeys =
+    activeChannel.channelType === "dm"
+      ? new Set(activeChannel.participantPubkeys.map(normalizePubkey))
+      : null;
+
   return agents.filter((agent) => {
     const normalizedPubkey = normalizePubkey(agent.pubkey);
     const channelIds = agent.channelIds ?? [];
@@ -141,6 +152,10 @@ export function getChannelAgentSessionAgents({
     const matchesDeclaredChannel =
       channelIds.includes(activeChannelId) ||
       channels.includes(activeChannel.name);
+
+    if (dmParticipantPubkeys?.has(normalizedPubkey)) {
+      return true;
+    }
 
     if (agent.agentSource === "member-bot") {
       return botMemberPubkeys?.has(normalizedPubkey) ?? matchesDeclaredChannel;
