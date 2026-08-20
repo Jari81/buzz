@@ -1,4 +1,4 @@
-import { Activity, Bot, FolderGit2, Inbox, Zap } from "lucide-react";
+import { Activity, Bot, FolderGit2, Inbox, TerminalSquare, Zap } from "lucide-react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { FeatureGate } from "@/shared/features";
@@ -17,6 +17,7 @@ type SidebarSelectedView =
   | "channel"
   | "messages"
   | "agents"
+  | "agent-sessions"
   | "workflows"
   | "pulse"
   | "projects";
@@ -40,6 +41,7 @@ type AppSidebarPinnedHeaderProps = {
 type AppSidebarPrimaryMenuProps = {
   homeBadgeCount: number;
   onSelectAgents: () => void;
+  onSelectAgentSessions: () => void;
   onSelectHome: () => void;
   onSelectProjects: () => void;
   onSelectPulse: () => void;
@@ -89,6 +91,7 @@ export function AppSidebarPinnedHeader({
 export function AppSidebarPrimaryMenu({
   homeBadgeCount,
   onSelectAgents,
+  onSelectAgentSessions,
   onSelectHome,
   onSelectProjects,
   onSelectPulse,
@@ -179,6 +182,20 @@ export function AppSidebarPrimaryMenu({
             </SidebarMenuLabel>
           </SidebarMenuButton>
         </SidebarMenuItem>
+        <FeatureGate feature="agentSessions">
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              data-testid="open-agent-sessions-view"
+              isActive={selectedView === "agent-sessions"}
+              onClick={onSelectAgentSessions}
+              tooltip="Agent Sessions"
+              type="button"
+            >
+              <TerminalSquare className="h-4 w-4" />
+              <SidebarMenuLabel>Agent Sessions</SidebarMenuLabel>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </FeatureGate>
         <FeatureGate feature="workflows">
           <SidebarMenuItem>
             <SidebarMenuButton

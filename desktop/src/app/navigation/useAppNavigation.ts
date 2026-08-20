@@ -70,6 +70,17 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goAgentSessions = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/agent-sessions",
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
   const goPulse = React.useCallback(
     (behavior?: NavigationBehavior) =>
       commitNavigation(
@@ -329,6 +340,7 @@ export function useAppNavigation() {
     closeSettings,
     closeWorkflowDetail,
     goAgents,
+    goAgentSessions,
     goChannel,
     goForumPost,
     goHome,

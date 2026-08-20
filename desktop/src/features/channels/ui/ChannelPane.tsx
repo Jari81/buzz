@@ -6,6 +6,10 @@ import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import { ComposerDockBackdrop } from "@/features/messages/ui/ComposerDockBackdrop";
 import { ComposerUploadProgressOverlay } from "@/features/messages/ui/ComposerUploadProgressOverlay";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
+import {
+  ContextUsageRing,
+  formatTokenCount,
+} from "@/features/messages/ui/ContextUsageRing";
 import { ComposerTimeoutBanner } from "@/features/moderation/ui/ComposerTimeoutBanner";
 import { useTimeoutState } from "@/features/moderation/lib/timeoutStore";
 import { isModerationDm } from "@/features/moderation/lib/moderationDm";
@@ -36,6 +40,7 @@ import { useThreadViewMode } from "@/features/channels/lib/threadViewModePrefere
 import { useThreadViewModeSwitch } from "@/features/channels/ui/useThreadViewModeSwitch";
 import { useFocusDrawerPresence } from "@/features/channels/ui/useFocusDrawerPresence";
 import { useChannelWorkingAgentPubkeys } from "@/features/agents/agentWorkingSignal";
+import { useChannelContextUsage } from "@/features/agents/lib/channelContextUsage";
 import { useCardMintJobs } from "@/features/agents/cardMintStore";
 import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar";
 import { mergeThreadComposerActivityPubkeys } from "@/features/channels/ui/channelComposerActivityMerge";
@@ -388,6 +393,36 @@ export const ChannelPane = React.memo(function ChannelPane({
     [activeChannel, currentPubkey, profiles],
   );
 
+  // BUZZ-DESKTOP-003: DM context-fill ring. Only mounted for DM channels —
+  // channel-scoped metrics let us attribute usage to the DM's agent without
+  // agent-pubkey plumbing.
+  const isDmChannel = activeChannel?.channelType === "dm";
+  const channelContextUsage = useChannelContextUsage(
+    isDmChannel ? (activeChannel?.id ?? null) : null,
+    currentPubkey,
+  );
+  const dmContextRing = React.useMemo(() => {
+    if (!isDmChannel || !channelContextUsage) return null;
+    const { usageRatio, model, lastInputTokens, contextWindow } =
+      channelContextUsage;
+    const pct =
+      usageRatio == null ? null : Math.round(usageRatio * 100);
+    const label = [
+      model ?? "unknown model",
+      pct == null ? "no usage data" : `${pct}% context used`,
+      lastInputTokens != null && contextWindow > 0
+        ? `${formatTokenCount(lastInputTokens)}/${formatTokenCount(contextWindow)} tokens`
+        : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    return (
+      <span className="inline-flex items-center px-1" title={label}>
+        <ContextUsageRing label={label} ratio={usageRatio} />
+      </span>
+    );
+  }, [channelContextUsage, isDmChannel]);
+
   const handleWelcomeAddAgent = React.useCallback(() => {
     onAddAgent?.({
       beforeSend: () =>
@@ -715,6 +750,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                   onSend={handleSendMessage}
                   profiles={profiles}
                   showBackgroundUploadProgress={false}
+                  toolbarExtraActions={dmContextRing}
                   placeholder={
                     timeoutState.active
                       ? "You're timed out by community moderators."
