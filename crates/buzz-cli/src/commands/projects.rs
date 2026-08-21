@@ -138,11 +138,22 @@ async fn submit_project(
 
 /// Advance the `created_at` counter off an observed head.
 fn next_timestamp(head: &Event) -> Result<Timestamp, CliError> {
-    head.created_at
+    // The relay rejects events whose timestamp drifts more than ±15 minutes
+    // from server time. A bare `head + 1` therefore fails for any head older
+    // than ~14 minutes. Advance to whichever is later: one second past the
+    // head (NIP-MP tombstones must be strictly after the live head) or the
+    // wall clock (keeps the tombstone inside the relay's drift window).
+    let wall = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| CliError::Other(format!("read system clock: {error}")))?
+        .as_secs();
+    let next = head
+        .created_at
         .as_secs()
         .checked_add(1)
-        .map(Timestamp::from)
-        .ok_or_else(|| CliError::Other("project timestamp cannot be advanced".into()))
+        .ok_or_else(|| CliError::Other("project timestamp cannot be advanced".into()))?
+        .max(wall);
+    Ok(Timestamp::from(next))
 }
 
 /// Strip `auth` from a tag list and pass the resulting envelope through

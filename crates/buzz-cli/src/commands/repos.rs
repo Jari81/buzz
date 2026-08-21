@@ -426,12 +426,20 @@ pub async fn cmd_delete_repo(client: &BuzzClient, repo_id: &str) -> Result<(), C
     let head = fetch_own_repo_announcement(client, repo_id)
         .await?
         .ok_or_else(|| CliError::NotFound(format!("repository {repo_id:?} not found")))?;
-    let next_ts = head
-        .created_at
-        .as_secs()
-        .checked_add(1)
-        .map(Timestamp::from)
-        .ok_or_else(|| CliError::Other("repository timestamp cannot be advanced".into()))?;
+    // The relay rejects events whose timestamp drifts more than ±15 minutes
+    // from server time; use whichever is later of head+1 (tombstone must be
+    // strictly after the live head) and the wall clock.
+    let wall = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| CliError::Other(format!("read system clock: {error}")))?
+        .as_secs();
+    let next_ts = Timestamp::from(
+        head.created_at
+            .as_secs()
+            .checked_add(1)
+            .ok_or_else(|| CliError::Other("repository timestamp cannot be advanced".into()))?
+            .max(wall),
+    );
 
     let pubkey_hex = client.keys().public_key().to_hex();
     let tombstone = build_delete_addressable(KIND_GIT_REPO_ANNOUNCEMENT, &pubkey_hex, repo_id)
