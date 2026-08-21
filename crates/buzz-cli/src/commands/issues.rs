@@ -1,5 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
+use buzz_core::kind::{
+    KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
+};
+
 use crate::client::BuzzClient;
 use crate::commands::with_git_provenance;
 use crate::error::CliError;
@@ -10,6 +14,52 @@ use serde::Deserialize;
 
 const ISSUE_ASSIGNMENT_LABEL: &str = "assignment";
 const ISSUE_UNASSIGNMENT_LABEL: &str = "unassignment";
+
+/// NIP-34 issue/patch status-transition kinds (open/resolved/closed/draft).
+const ISSUE_STATUS_KINDS: [u32; 4] = [
+    KIND_GIT_STATUS_OPEN,
+    KIND_GIT_STATUS_MERGED,
+    KIND_GIT_STATUS_CLOSED,
+    KIND_GIT_STATUS_DRAFT,
+];
+
+/// Relay filter for the status-transition events (kind 1630–1633) of the
+/// given issue event ids. Status events reference their issue via an `e` tag,
+/// so `#e` is the complete read path regardless of whether the status setter
+/// passed repo coordinates (the `a` tag is optional on status events).
+fn issue_status_filter(issue_ids: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "kinds": ISSUE_STATUS_KINDS,
+        "#e": issue_ids,
+        "limit": 1000
+    })
+}
+
+fn status_event_created_at(event: &serde_json::Value) -> i64 {
+    event.get("created_at").and_then(|c| c.as_i64()).unwrap_or(0)
+}
+
+/// Reorder a flat relay response: issue events (kind 1621) first, then their
+/// status events (kind 1630–1633) chronologically. This is the read path for
+/// `buzz issues status --content` — without it, status-change commentary is
+/// accepted by the relay but invisible to every CLI consumer.
+fn order_issue_with_status_events(raw: &str) -> Result<String, CliError> {
+    let events: Vec<serde_json::Value> = serde_json::from_str(raw)
+        .map_err(|e| CliError::Other(format!("failed to parse issue response: {e}")))?;
+    let mut issues: Vec<serde_json::Value> = Vec::new();
+    let mut statuses: Vec<serde_json::Value> = Vec::new();
+    for event in events {
+        match event.get("kind").and_then(|k| k.as_u64()) {
+            Some(1621) => issues.push(event),
+            Some(kind) if ISSUE_STATUS_KINDS.contains(&(kind as u32)) => statuses.push(event),
+            _ => {}
+        }
+    }
+    statuses.sort_by_key(status_event_created_at);
+    issues.append(&mut statuses);
+    serde_json::to_string(&issues)
+        .map_err(|e| CliError::Other(format!("failed to serialize issue response: {e}")))
+}
 
 fn assignment_note_label(assignees: &[String], label: Option<&str>) -> Result<String, CliError> {
     if let Some(label) = label {
@@ -445,12 +495,13 @@ async fn issue_assignment_context(
 
 pub async fn cmd_get_issue(client: &BuzzClient, event: &str) -> Result<(), CliError> {
     validate_hex64(event)?;
-    let filter = serde_json::json!({
+    let issue_filter = serde_json::json!({
         "kinds": [1621],
         "ids": [event]
     });
-    let resp = client.query(&filter).await?;
-    println!("{resp}");
+    let status_filter = issue_status_filter(&[event]);
+    let resp = client.query_multi(&[issue_filter, status_filter]).await?;
+    println!("{}", order_issue_with_status_events(&resp)?);
     Ok(())
 }
 
@@ -483,7 +534,27 @@ pub async fn cmd_list_issues(
     }
 
     let resp = client.query(&filter).await?;
-    println!("{resp}");
+    let issues: Vec<serde_json::Value> = serde_json::from_str(&resp)
+        .map_err(|e| CliError::Other(format!("failed to parse issue list: {e}")))?;
+    let issue_ids: Vec<&str> = issues
+        .iter()
+        .filter_map(|issue| issue.get("id").and_then(|id| id.as_str()))
+        .collect();
+    if issue_ids.is_empty() {
+        println!("{resp}");
+        return Ok(());
+    }
+    let status_resp = client.query(&issue_status_filter(&issue_ids)).await?;
+    let mut statuses: Vec<serde_json::Value> = serde_json::from_str(&status_resp)
+        .map_err(|e| CliError::Other(format!("failed to parse status events: {e}")))?;
+    statuses.sort_by_key(status_event_created_at);
+    let mut merged = issues;
+    merged.append(&mut statuses);
+    println!(
+        "{}",
+        serde_json::to_string(&merged)
+            .map_err(|e| CliError::Other(format!("failed to serialize issue list: {e}")))?
+    );
     Ok(())
 }
 

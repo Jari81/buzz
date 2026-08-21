@@ -2,6 +2,7 @@ use buzz_core::{
     git_perms::{parse_protection_tag, parse_protection_tags, RefPattern},
     kind::KIND_GIT_REPO_ANNOUNCEMENT,
 };
+use buzz_sdk::build_delete_addressable;
 use nostr::{Event, EventBuilder, Tag, Timestamp};
 
 use crate::client::BuzzClient;
@@ -407,6 +408,52 @@ async fn cmd_bind_repo(client: &BuzzClient, repo_id: &str, channel: &str) -> Res
     submit_repo_update(client, builder).await
 }
 
+/// `buzz repos delete`
+///
+/// Head-based and verified, mirroring `buzz projects delete`:
+///   1. Fetch own live head — `NotFound` if absent.
+///   2. Build a kind:5 tombstone at `head.created_at + 1` targeting the
+///      addressable coordinate `30617:<signer>:<repo-id>`.
+///   3. Submit.
+///   4. Re-query the coordinate; if a newer head survived → `Conflict`.
+///
+/// A tombstoned announcement stops resolving on the relay's git transport
+/// (clone/fetch/push 404 for everyone); issues and patches already filed on
+/// it remain stored.
+pub async fn cmd_delete_repo(client: &BuzzClient, repo_id: &str) -> Result<(), CliError> {
+    validate_repo_id(repo_id)?;
+
+    let head = fetch_own_repo_announcement(client, repo_id)
+        .await?
+        .ok_or_else(|| CliError::NotFound(format!("repository {repo_id:?} not found")))?;
+    let next_ts = head
+        .created_at
+        .as_secs()
+        .checked_add(1)
+        .map(Timestamp::from)
+        .ok_or_else(|| CliError::Other("repository timestamp cannot be advanced".into()))?;
+
+    let pubkey_hex = client.keys().public_key().to_hex();
+    let tombstone = build_delete_addressable(KIND_GIT_REPO_ANNOUNCEMENT, &pubkey_hex, repo_id)
+        .map_err(|e| CliError::Other(format!("failed to build delete event: {e}")))?
+        .custom_created_at(next_ts);
+
+    let event = client.sign_event(tombstone)?;
+    let raw = client.submit_event(event).await?;
+    parse_write_response(&raw, "delete event was dominated; a newer head exists")?;
+
+    // Post-submit verification: re-query to confirm the head is gone.
+    if let Some(survivor) = fetch_own_repo_announcement(client, repo_id).await? {
+        return Err(CliError::Conflict(format!(
+            "repository {repo_id:?} still exists (head at {}); a concurrent write raced the delete",
+            survivor.created_at.as_secs()
+        )));
+    }
+
+    println!("{}", serde_json::json!({ "deleted": repo_id, "status": "ok" }));
+    Ok(())
+}
+
 pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::{ReposCmd, ReposProtectCmd};
     match cmd {
@@ -434,6 +481,7 @@ pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), C
         ReposCmd::Get { id, owner } => cmd_get_repo(client, &id, owner.as_deref()).await,
         ReposCmd::List { owner, limit } => cmd_list_repos(client, owner.as_deref(), limit).await,
         ReposCmd::Bind { id, channel } => cmd_bind_repo(client, &id, &channel).await,
+        ReposCmd::Delete { id } => cmd_delete_repo(client, &id).await,
         ReposCmd::Protect(command) => match command {
             ReposProtectCmd::List { id } => cmd_protect_list(client, &id).await,
             ReposProtectCmd::Set {
