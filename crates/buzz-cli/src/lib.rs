@@ -1199,6 +1199,17 @@ pub enum ReposCmd {
         #[arg(long)]
         channel: String,
     },
+    /// Delete one of your repositories (head-based tombstone; verified after submit).
+    ///
+    /// Removes the announcement so the coordinate stops resolving for
+    /// clone/fetch/push and disappears from listings. Already-filed issues
+    /// and patches remain stored. Only the announcement author can delete
+    /// their own repository.
+    Delete {
+        /// Repository identifier (d-tag).
+        #[arg(long)]
+        id: String,
+    },
     /// Manage branch and tag protection rules on one of your repositories.
     #[command(subcommand)]
     Protect(ReposProtectCmd),
@@ -2292,7 +2303,7 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "repos"),
-            vec!["bind", "create", "get", "list", "protect"]
+            vec!["bind", "create", "delete", "get", "list", "protect"]
         );
         let repos = cmd
             .get_subcommands()
@@ -2368,7 +2379,7 @@ mod tests {
             ("pr", 5),
             ("projects", 7),
             ("reactions", 3),
-            ("repos", 5),
+            ("repos", 6),
             ("social", 7),
             ("upload", 1),
             ("users", 5),
