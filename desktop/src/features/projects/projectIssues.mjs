@@ -211,6 +211,7 @@ export function eventToProjectIssue(
     assigneeOperationHeads: assignmentState.heads,
     status: statusFromEvent(issue, latestStatus),
     statusEventId: latestStatus?.id ?? null,
+    statusCreatedAt: latestStatus?.created_at ?? null,
     updatedAt:
       [
         ...comments,
@@ -229,6 +230,13 @@ export function projectIssueEventsToIssues(
   return [...issueEvents]
     .map((issue) => eventToProjectIssue(issue, statusEvents, commentEvents))
     .sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
+/** Keep consecutive status changes ordered across whole-second Nostr
+ * timestamps — `latestStatusForIssue` picks the highest `created_at`, so a
+ * second change inside the same second would otherwise be a coin flip. */
+export function nextProjectIssueStatusCreatedAt(issue, now) {
+  return Math.max(now, (issue.statusCreatedAt ?? 0) + 1);
 }
 
 /** Keep consecutive comments ordered across whole-second Nostr timestamps. */
