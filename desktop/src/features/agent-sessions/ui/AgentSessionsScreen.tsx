@@ -4,8 +4,10 @@ import {
   Circle,
   CircleAlert,
   Loader2,
+  RotateCcw,
   TerminalSquare,
 } from "lucide-react";
+import { toast } from "sonner";
 
 import {
   deriveAgentSessions,
@@ -14,6 +16,7 @@ import {
 import { buildTranscriptState } from "@/features/agents/ui/agentSessionTranscript";
 import { useObserverEvents } from "@/features/agents/ui/useObserverEvents";
 import { AgentSessionTranscriptList } from "@/features/agents/ui/AgentSessionTranscriptList";
+import { isRotateSessionAuthorized } from "@/features/agent-sessions/lib/rotateSessionAuth";
 import {
   useContextUsageArchive,
   asTurnMetric,
@@ -25,6 +28,7 @@ import {
   useManagedAgentsQuery,
 } from "@/features/agents/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { sendChannelMessage } from "@/shared/api/tauri";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { cn } from "@/shared/lib/cn";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
@@ -371,6 +375,7 @@ function SelectedSessionTranscript({
             no token metrics yet
           </span>
         )}
+        <RotateSessionButton agentPubkey={agentPubkey} channelId={channelId} />
       </header>
       <div className="min-h-0 flex-1 overflow-hidden">
         <AgentSessionTranscriptList
@@ -386,5 +391,83 @@ function SelectedSessionTranscript({
         />
       </div>
     </>
+  );
+}
+
+/**
+ * Kill/reset control for one session: publishes the harness `!rotate`
+ * owner command (kind 9, content exactly "!rotate", agent p-tag mention)
+ * into the session's channel. buzz-acp consumes it owner-side: an
+ * in-flight turn is cancelled and the channel session invalidated; idle
+ * channel sessions are dropped immediately — the next mention starts a
+ * fresh session. This is the documented cleanup path for stuck/dead
+ * sessions (see LOCAL_MODIFICATIONS BUZZ-ACP notes); rotation is
+ * per-channel, matching the harness contract.
+ */
+function RotateSessionButton({
+  agentPubkey,
+  channelId,
+}: {
+  agentPubkey: string;
+  channelId: string | null;
+}) {
+  const identity = useIdentityQuery();
+  const relayAgents = useRelayAgentsQuery();
+  const [pending, setPending] = React.useState(false);
+
+  const authorized = isRotateSessionAuthorized(
+    relayAgents.data,
+    identity.data?.pubkey ?? null,
+    agentPubkey,
+  );
+
+  const rotate = React.useCallback(async () => {
+    if (!channelId) {
+      toast.error("No channel known for this session — cannot reset it.");
+      return;
+    }
+    const confirmed = window.confirm(
+      "Reset this agent's channel session?\n\n" +
+        "This sends !rotate to the channel: the harness cancels any in-flight turn and starts the next prompt with a fresh session. " +
+        "Idle sessions are dropped immediately. Only the agent owner can do this.",
+    );
+    if (!confirmed) return;
+    setPending(true);
+    try {
+      await sendChannelMessage(channelId, "!rotate", undefined, undefined, [
+        agentPubkey,
+      ]);
+      toast.success("Reset sent — the session will rotate.");
+    } catch (error) {
+      toast.error(
+        `Reset failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      setPending(false);
+    }
+  }, [agentPubkey, channelId]);
+
+  return (
+    <button
+      className={cn(
+        "ml-auto flex items-center gap-1 rounded-md border border-border/60 px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground",
+        (!authorized || pending) && "opacity-50",
+      )}
+      disabled={!authorized || pending}
+      onClick={rotate}
+      title={
+        authorized
+          ? "Send !rotate: cancel in-flight turn and reset the channel session"
+          : "Only the agent owner can rotate sessions"
+      }
+      type="button"
+    >
+      {pending ? (
+        <Loader2 aria-hidden className="h-3 w-3 animate-spin" />
+      ) : (
+        <RotateCcw aria-hidden className="h-3 w-3" />
+      )}
+      Reset session
+    </button>
   );
 }
