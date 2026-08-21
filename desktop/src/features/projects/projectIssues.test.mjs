@@ -9,6 +9,7 @@ import {
   ISSUE_ASSIGNMENT_LABEL,
   ISSUE_UNASSIGNMENT_LABEL,
   nextProjectIssueCommentCreatedAt,
+  nextProjectIssueStatusCreatedAt,
   PROJECT_ISSUE_STATUS,
 } from "./projectIssues.mjs";
 
@@ -104,6 +105,36 @@ test("honors status events from the issue author and repo owner", () => {
   assert.equal(
     eventToProjectIssue(issueEvent(), [ownerClosed]).status,
     PROJECT_ISSUE_STATUS.CLOSED,
+  );
+});
+
+test("exposes the timestamp of the status event it honored", () => {
+  const ownerClosed = statusEvent({
+    kind: 1632,
+    pubkey: OWNER,
+    createdAt: 300,
+  });
+  const issue = eventToProjectIssue(issueEvent(), [ownerClosed]);
+
+  assert.equal(issue.statusCreatedAt, 300);
+  assert.equal(eventToProjectIssue(issueEvent()).statusCreatedAt, null);
+});
+
+test("a follow-up status change outranks the one it replaces", () => {
+  const ownerClosed = statusEvent({
+    kind: 1632,
+    pubkey: OWNER,
+    createdAt: 300,
+  });
+  const issue = eventToProjectIssue(issueEvent(), [ownerClosed]);
+
+  // Nostr timestamps are whole seconds: reopening within the same second must
+  // still sort above the close it replaces.
+  assert.equal(nextProjectIssueStatusCreatedAt(issue, 300), 301);
+  assert.equal(nextProjectIssueStatusCreatedAt(issue, 900), 900);
+  assert.equal(
+    nextProjectIssueStatusCreatedAt(eventToProjectIssue(issueEvent()), 900),
+    900,
   );
 });
 

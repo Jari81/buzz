@@ -97,3 +97,37 @@ test("issue assignees can be assigned and unassigned", async ({ page }) => {
   await expect(page.getByText("Issue unassigned.")).toBeVisible();
   await expect(unassign).toHaveCount(0, { timeout: 10_000 });
 });
+
+test("issue status can be changed from the detail rail", async ({ page }) => {
+  await installMockBridge(page);
+  await openBuzzProject(page);
+
+  await page.getByRole("tab", { name: "Issues", exact: true }).click();
+  const issueRow = page.getByTestId("project-issue-row").first();
+  await expect(issueRow).toBeVisible({ timeout: 10_000 });
+  await issueRow.getByRole("button", { name: /^#/ }).click();
+
+  const trigger = page.getByTestId("project-issue-status-trigger");
+  await expect(trigger).toBeVisible({ timeout: 10_000 });
+
+  // Label-driven states have no status event behind them and must not be
+  // offered as something the user can publish.
+  await trigger.click();
+  await expect(
+    page.getByTestId("project-issue-status-option-resolved"),
+  ).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "In Progress" })).toHaveCount(
+    0,
+  );
+  await page.getByTestId("project-issue-status-option-resolved").click();
+
+  await expect(page.getByText("Status set to Done.")).toBeVisible({
+    timeout: 10_000,
+  });
+  // The rail reflects the new status without a reload.
+  await expect(trigger).toContainText("Done", { timeout: 10_000 });
+
+  await trigger.click();
+  await page.getByTestId("project-issue-status-option-closed").click();
+  await expect(trigger).toContainText("Closed", { timeout: 10_000 });
+});

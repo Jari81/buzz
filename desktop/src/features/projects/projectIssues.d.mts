@@ -32,6 +32,7 @@ export type ProjectIssue = {
   assigneeOperationHeads: Record<string, string>;
   status: ProjectIssueStatus;
   statusEventId: string | null;
+  statusCreatedAt: number | null;
   updatedAt: number;
   comments: ProjectIssueComment[];
 };
@@ -61,6 +62,10 @@ export function projectIssueEventsToIssues(
   statusEvents?: RelayEvent[],
   commentEvents?: RelayEvent[],
 ): ProjectIssue[];
+export function nextProjectIssueStatusCreatedAt(
+  issue: ProjectIssue,
+  now: number,
+): number;
 export function nextProjectIssueCommentCreatedAt(
   issue: ProjectIssue,
   now: number,

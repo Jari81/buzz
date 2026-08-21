@@ -1,4 +1,11 @@
-import { CircleCheck, CircleDot, CircleX, MessageSquare } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  CircleCheck,
+  CircleDot,
+  CircleX,
+  MessageSquare,
+} from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -14,6 +21,13 @@ import {
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
+import {
+  canChangeProjectIssueStatus,
+  ISSUE_LIFECYCLE_STATUS_LABEL,
+  ISSUE_LIFECYCLE_STATUSES,
+  type ProjectIssueLifecycleStatus,
+  useUpdateProjectIssueStatusMutation,
+} from "@/features/projects/issueStatus";
 import { entityDiscussionQuery } from "@/features/projects/lib/discussionChannels";
 import { issueShareLink } from "@/features/projects/lib/projectShareLinks";
 import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
@@ -21,6 +35,12 @@ import { useIdentityQuery } from "@/shared/api/hooks";
 import type { ChannelMember } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/shared/ui/dropdown-menu";
 import { IssueAssigneeFacepile, IssueAssigneesRow } from "./IssueAssigneesRow";
 import {
   ProjectFeedRow,
@@ -275,6 +295,79 @@ export function ProjectIssueDetail({
   );
 }
 
+/** Status control for the issue meta rail: publishes a NIP-34 status event
+ * (kind 1630/1631/1632/1633) instead of leaving the desktop read-only.
+ *
+ * Only the four protocol states are offered. "In Progress" and "In Review"
+ * are label heuristics with no status event behind them, so they can be shown
+ * as the current state but never selected here. */
+function IssueStatusPicker({
+  issue,
+  project,
+  signAsManagedOwner,
+}: {
+  issue: ProjectIssue;
+  project: Project;
+  signAsManagedOwner: boolean;
+}) {
+  const { isPending, mutateAsync: updateIssueStatus } =
+    useUpdateProjectIssueStatusMutation(project);
+  const visual = issueStatusVisual(issue.status);
+
+  const handleSelect = React.useCallback(
+    async (status: ProjectIssueLifecycleStatus) => {
+      if (ISSUE_LIFECYCLE_STATUS_LABEL[status] === issue.status) return;
+      try {
+        await updateIssueStatus({ issue, signAsManagedOwner, status });
+        toast.success(`Status set to ${ISSUE_LIFECYCLE_STATUS_LABEL[status]}.`);
+      } catch (error) {
+        toast.error(
+          error instanceof Error
+            ? error.message
+            : "Failed to update issue status.",
+        );
+      }
+    },
+    [issue, signAsManagedOwner, updateIssueStatus],
+  );
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        aria-label="Change issue status"
+        className={`inline-flex items-center gap-1.5 rounded-md border border-border/60 px-2.5 py-1 text-xs font-medium hover:bg-accent/40 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60 ${visual.className}`}
+        data-testid="project-issue-status-trigger"
+        disabled={isPending}
+      >
+        <visual.icon className="h-3.5 w-3.5" />
+        {issue.status}
+        <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start">
+        {ISSUE_LIFECYCLE_STATUSES.map((status) => {
+          const label = ISSUE_LIFECYCLE_STATUS_LABEL[status];
+          const option = issueStatusVisual(label);
+          return (
+            <DropdownMenuItem
+              data-testid={`project-issue-status-option-${status}`}
+              key={status}
+              onSelect={() => {
+                void handleSelect(status);
+              }}
+            >
+              <option.icon className={`h-3.5 w-3.5 ${option.className}`} />
+              {label}
+              {label === issue.status ? (
+                <Check className="ml-auto h-3.5 w-3.5 text-muted-foreground" />
+              ) : null}
+            </DropdownMenuItem>
+          );
+        })}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 /** Right-hand meta column for the issue detail view: status, assignees,
  * author, labels, and dates — keeps the conversation column focused. */
 function IssueMetaRail({
@@ -302,6 +395,12 @@ function IssueMetaRail({
   // everyone else who is signed in may still self-assign.
   const canAssignOthers =
     Boolean(viewer) && (isAuthor || isOwner || isManagedAgentOwner);
+  const canChangeStatus = canChangeProjectIssueStatus({
+    isManagedAgentOwner,
+    issueAuthor: issue.author,
+    projectOwner: project.owner,
+    viewer,
+  });
 
   return (
     <aside
@@ -311,12 +410,21 @@ function IssueMetaRail({
       )}
     >
       <OverviewRailSection title="Status">
-        <span
-          className={`inline-flex items-center gap-1.5 rounded-md border border-border/60 px-2.5 py-1 text-xs font-medium ${status.className}`}
-        >
-          <status.icon className="h-3.5 w-3.5" />
-          {issue.status}
-        </span>
+        {canChangeStatus ? (
+          <IssueStatusPicker
+            issue={issue}
+            project={project}
+            signAsManagedOwner={isManagedAgentOwner && !isOwner}
+          />
+        ) : (
+          <span
+            className={`inline-flex items-center gap-1.5 rounded-md border border-border/60 px-2.5 py-1 text-xs font-medium ${status.className}`}
+            data-testid="project-issue-status"
+          >
+            <status.icon className="h-3.5 w-3.5" />
+            {issue.status}
+          </span>
+        )}
       </OverviewRailSection>
       {issue.assignees.length > 0 || viewer ? (
         <OverviewRailSection title="Assignees">

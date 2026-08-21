@@ -659,6 +659,7 @@ pub fn run() {
             publish_project_owner_announcement,
             sign_project_pull_request_status,
             sign_project_pull_request_review_request,
+            sign_project_issue_status,
             sign_project_issue_assignment,
             sign_project_issue_unassignment,
             publish_project_pull_request_merged_status,

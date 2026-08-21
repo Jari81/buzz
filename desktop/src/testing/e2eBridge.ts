@@ -11947,6 +11947,45 @@ export function maybeInstallE2eTauriMocks() {
         getMockProjectEventStore().push(event);
         return null;
       }
+      case "sign_project_issue_status": {
+        const { input } = payload as {
+          input: {
+            createdAt: number;
+            issueAuthor: string;
+            issueId: string;
+            repoAddress: string;
+            status: "open" | "resolved" | "closed" | "draft";
+            targetOwner: string;
+          };
+        };
+        const kind = {
+          open: KIND_GIT_STATUS_OPEN,
+          resolved: KIND_GIT_STATUS_MERGED,
+          closed: KIND_GIT_STATUS_CLOSED,
+          draft: KIND_GIT_STATUS_DRAFT,
+        }[input.status];
+        const recipientPubkeys = Array.from(
+          new Set(
+            [input.targetOwner, input.issueAuthor].map((pubkey) =>
+              pubkey.trim().toLowerCase(),
+            ),
+          ),
+        );
+        const event = createMockEvent(
+          kind,
+          "",
+          [
+            ["e", input.issueId, "", "root"],
+            ["a", input.repoAddress],
+            ...recipientPubkeys.map((pubkey) => ["p", pubkey]),
+          ],
+          input.targetOwner,
+          input.createdAt,
+        );
+        window.__BUZZ_E2E_SIGNED_EVENTS__?.push(event);
+        getMockProjectEventStore().push(event);
+        return null;
+      }
       case "sign_project_pull_request_review_request": {
         const { input } = payload as {
           input: {
