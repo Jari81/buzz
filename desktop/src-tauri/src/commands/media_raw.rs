@@ -73,6 +73,30 @@ pub fn release_media_upload(progress_id: String) {
     finish_media_upload(Some(&progress_id));
 }
 
+/// Recover raw bytes from a JSON IPC body.
+///
+/// The renderer sends the file as a byte body, but if the webview's IPC
+/// transport degrades from the custom protocol (raw-capable) to the
+/// postMessage fallback — a sticky downgrade that happens after a single
+/// custom-protocol failure, e.g. AV/VPN interception of `ipc.localhost` —
+/// the same payload arrives JSON-serialized as a number array. Accept that
+/// shape so uploads keep working on the degraded transport; the raw fast
+/// path is untouched while it works.
+fn bytes_from_json_body(value: &serde_json::Value) -> Result<Vec<u8>, String> {
+    let serde_json::Value::Array(items) = value else {
+        return Err("raw upload requires a byte body".to_string());
+    };
+    let mut data = Vec::with_capacity(items.len());
+    for item in items {
+        let byte = item
+            .as_u64()
+            .filter(|n| *n <= u64::from(u8::MAX))
+            .ok_or("raw upload body is not a byte array")?;
+        data.push(byte as u8);
+    }
+    Ok(data)
+}
+
 /// Upload raw IPC bytes without expanding a large browser File into JSON.
 #[tauri::command]
 pub async fn upload_media_bytes_raw(
@@ -82,7 +106,7 @@ pub async fn upload_media_bytes_raw(
 ) -> Result<BlobDescriptor, String> {
     let data = match request.body() {
         InvokeBody::Raw(data) => data.clone(),
-        InvokeBody::Json(_) => return Err("raw upload requires a byte body".to_string()),
+        InvokeBody::Json(value) => bytes_from_json_body(value)?,
     };
     let filename = optional_raw_upload_header(&request, "x-buzz-filename")?;
     let progress_id = optional_raw_upload_header(&request, "x-buzz-progress-id")?;
@@ -109,5 +133,23 @@ mod tests {
     fn test_decode_raw_upload_header_preserves_unicode() {
         let encoded = URL_SAFE_NO_PAD.encode("clip 🎬.mp4");
         assert_eq!(decode_raw_upload_header(&encoded).unwrap(), "clip 🎬.mp4");
+    }
+
+    #[test]
+    fn test_bytes_from_json_body_recovers_byte_array() {
+        let value = serde_json::json!([7, 255, 0, 128]);
+        assert_eq!(bytes_from_json_body(&value).unwrap(), vec![7, 255, 0, 128]);
+    }
+
+    #[test]
+    fn test_bytes_from_json_body_rejects_non_byte_numbers() {
+        assert!(bytes_from_json_body(&serde_json::json!([7, 256])).is_err());
+        assert!(bytes_from_json_body(&serde_json::json!([7, -1])).is_err());
+    }
+
+    #[test]
+    fn test_bytes_from_json_body_rejects_non_array_bodies() {
+        assert!(bytes_from_json_body(&serde_json::json!({"data": [1]})).is_err());
+        assert!(bytes_from_json_body(&serde_json::json!(null)).is_err());
     }
 }
