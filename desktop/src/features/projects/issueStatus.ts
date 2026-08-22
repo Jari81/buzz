@@ -59,17 +59,22 @@ export const ISSUE_LIFECYCLE_STATUSES: ProjectIssueLifecycleStatus[] = [
   "closed",
 ];
 
-/** Only the issue author and the repo owner are trusted for status changes —
- * the same rule `allowedActorsForRoot` applies when parsing them back. A
- * managed-agent owner counts as the owner because the desktop can sign on its
- * behalf. */
+/** The issue author, the repo owner, and anyone assigned to the issue are
+ * trusted for status changes. A managed-agent owner counts as the owner
+ * because the desktop can sign on its behalf. Assignees are the ticket's
+ * handlers ("Bearbeiter"): whoever works the issue must be able to move it,
+ * not just whoever opened it. The read path applies the same rule in
+ * `latestStatusForIssue`, so a status event published by an assignee is
+ * honored instead of silently discarded. */
 export function canChangeProjectIssueStatus({
   isManagedAgentOwner,
+  issueAssignees,
   issueAuthor,
   projectOwner,
   viewer,
 }: {
   isManagedAgentOwner: boolean;
+  issueAssignees: readonly string[];
   issueAuthor: string;
   projectOwner: string;
   viewer: string | null;
@@ -78,7 +83,8 @@ export function canChangeProjectIssueStatus({
   return (
     viewer === issueAuthor.toLowerCase() ||
     viewer === projectOwner.toLowerCase() ||
-    isManagedAgentOwner
+    isManagedAgentOwner ||
+    issueAssignees.some((assignee) => viewer === assignee.toLowerCase())
   );
 }
 

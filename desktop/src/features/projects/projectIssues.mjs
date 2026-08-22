@@ -54,8 +54,13 @@ export function allowedActorsForRoot(rootEvent) {
   return allowed;
 }
 
-function latestStatusForIssue(issue, statusEvents) {
+function latestStatusForIssue(issue, statusEvents, assignees) {
   const allowedActors = allowedActorsForRoot(issue);
+  // Assignees are the issue's handlers and may move it just like the author
+  // and repo owner (mirror of canChangeProjectIssueStatus in issueStatus.ts).
+  for (const assignee of assignees) {
+    allowedActors.add(assignee.toLowerCase());
+  }
   return statusEvents
     .filter(
       (event) =>
@@ -182,14 +187,21 @@ export function eventToProjectIssue(
   statusEvents = [],
   commentEvents = [],
 ) {
-  const latestStatus = latestStatusForIssue(issue, statusEvents);
   const issueCommentEvents = commentEvents.filter((event) =>
     event.tags.some(
       (tag) => (tag[0] === "e" || tag[0] === "E") && tag[1] === issue.id,
     ),
   );
-  const comments = commentsForIssue(issueCommentEvents);
+  // Assignment state comes before status resolution: assignees are trusted
+  // status actors, so their set must be known before a status event is
+  // honored.
   const assignmentState = assignmentStateForIssue(issue, issueCommentEvents);
+  const latestStatus = latestStatusForIssue(
+    issue,
+    statusEvents,
+    assignmentState.assignees,
+  );
+  const comments = commentsForIssue(issueCommentEvents);
   const title =
     getTag(issue, "subject") ||
     issue.content.split("\n")[0] ||

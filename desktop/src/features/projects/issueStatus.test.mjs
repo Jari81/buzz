@@ -9,6 +9,7 @@ import {
 
 const OWNER = "a".repeat(64);
 const AUTHOR = "b".repeat(64);
+const ASSIGNEE = "d".repeat(64);
 const STRANGER = "c".repeat(64);
 
 test("every publishable lifecycle state maps to the label the read path derives", () => {
@@ -39,6 +40,7 @@ test("issue author and repo owner may change status", () => {
     assert.equal(
       canChangeProjectIssueStatus({
         isManagedAgentOwner: false,
+        issueAssignees: [],
         issueAuthor: AUTHOR,
         projectOwner: OWNER,
         viewer,
@@ -48,10 +50,24 @@ test("issue author and repo owner may change status", () => {
   }
 });
 
+test("an assignee may change status", () => {
+  assert.equal(
+    canChangeProjectIssueStatus({
+      isManagedAgentOwner: false,
+      issueAssignees: [ASSIGNEE],
+      issueAuthor: AUTHOR,
+      projectOwner: OWNER,
+      viewer: ASSIGNEE,
+    }),
+    true,
+  );
+});
+
 test("a third party may not change status", () => {
   assert.equal(
     canChangeProjectIssueStatus({
       isManagedAgentOwner: false,
+      issueAssignees: [ASSIGNEE],
       issueAuthor: AUTHOR,
       projectOwner: OWNER,
       viewer: STRANGER,
@@ -64,6 +80,7 @@ test("a signed-out viewer may not change status", () => {
   assert.equal(
     canChangeProjectIssueStatus({
       isManagedAgentOwner: true,
+      issueAssignees: [],
       issueAuthor: AUTHOR,
       projectOwner: OWNER,
       viewer: null,
@@ -76,6 +93,7 @@ test("the human owner of a managed-agent repo owner may change status", () => {
   assert.equal(
     canChangeProjectIssueStatus({
       isManagedAgentOwner: true,
+      issueAssignees: [],
       issueAuthor: AUTHOR,
       projectOwner: OWNER,
       viewer: STRANGER,

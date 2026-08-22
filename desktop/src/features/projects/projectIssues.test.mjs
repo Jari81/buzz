@@ -108,6 +108,33 @@ test("honors status events from the issue author and repo owner", () => {
   );
 });
 
+test("honors status events from an assignee", () => {
+  const assignee = "d".repeat(64);
+  const assignment = assignmentComment(AUTHOR, [assignee], "assign-1");
+  const assigneeDone = statusEvent({
+    kind: 1631,
+    pubkey: assignee,
+    createdAt: 300,
+  });
+
+  const issue = eventToProjectIssue(issueEvent(), [assigneeDone], [assignment]);
+  assert.equal(issue.status, PROJECT_ISSUE_STATUS.DONE);
+  assert.deepEqual(issue.assignees, [assignee]);
+});
+
+test("still ignores status events from a non-assignee stranger", () => {
+  const assignee = "d".repeat(64);
+  const assignment = assignmentComment(AUTHOR, [assignee], "assign-1");
+  const strangerDone = statusEvent({
+    kind: 1631,
+    pubkey: ATTACKER,
+    createdAt: 300,
+  });
+
+  const issue = eventToProjectIssue(issueEvent(), [strangerDone], [assignment]);
+  assert.equal(issue.status, PROJECT_ISSUE_STATUS.BACKLOG);
+});
+
 test("exposes the timestamp of the status event it honored", () => {
   const ownerClosed = statusEvent({
     kind: 1632,

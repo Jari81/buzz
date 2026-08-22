@@ -397,6 +397,7 @@ function IssueMetaRail({
     Boolean(viewer) && (isAuthor || isOwner || isManagedAgentOwner);
   const canChangeStatus = canChangeProjectIssueStatus({
     isManagedAgentOwner,
+    issueAssignees: issue.assignees,
     issueAuthor: issue.author,
     projectOwner: project.owner,
     viewer,
