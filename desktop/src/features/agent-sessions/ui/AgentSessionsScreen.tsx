@@ -6,6 +6,7 @@ import {
   Loader2,
   RotateCcw,
   TerminalSquare,
+  Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -17,6 +18,10 @@ import { buildTranscriptState } from "@/features/agents/ui/agentSessionTranscrip
 import { useObserverEvents } from "@/features/agents/ui/useObserverEvents";
 import { AgentSessionTranscriptList } from "@/features/agents/ui/AgentSessionTranscriptList";
 import { isRotateSessionAuthorized } from "@/features/agent-sessions/lib/rotateSessionAuth";
+import {
+  readKilledAgentSessions,
+  recordKilledAgentSession,
+} from "@/features/agent-sessions/lib/killedAgentSessions";
 import {
   useContextUsageArchive,
   asTurnMetric,
@@ -164,48 +169,115 @@ function relativeTime(iso: string): string {
 }
 
 function SessionRow({
+  authorized,
+  onKill,
+  onReset,
+  onSelect,
   selected,
   session,
-  onSelect,
 }: {
+  authorized: boolean;
+  onKill: () => void;
+  onReset: () => void;
+  onSelect: () => void;
   selected: boolean;
   session: AgentSessionSummary;
-  onSelect: () => void;
 }) {
   const stuck = isPossiblyStuck(session);
+  // The row is a div holding sibling buttons: a real <button> for selection
+  // plus the two action buttons. Nesting <button> in <button> is invalid
+  // HTML and misroutes clicks, so the row itself stays unrole'd.
   return (
-    <button
+    <div
       className={cn(
         "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent",
         selected && "bg-accent",
       )}
-      onClick={onSelect}
-      type="button"
     >
-      <StatusIcon status={session.status} stuck={stuck} />
-      <span className="min-w-0 flex-1 truncate font-mono text-xs">
-        {session.sessionId.slice(0, 8)}
+      <button
+        className="flex min-w-0 flex-1 items-center gap-2 text-left"
+        onClick={onSelect}
+        type="button"
+      >
+        <StatusIcon status={session.status} stuck={stuck} />
+        <span className="min-w-0 flex-1 truncate font-mono text-xs">
+          {session.sessionId.slice(0, 8)}
+        </span>
+        {stuck ? <span className="text-xs text-amber-500">stuck?</span> : null}
+        <span className="shrink-0 text-xs text-muted-foreground">
+          {session.turnCount}t · {relativeTime(session.lastTimestamp)}
+        </span>
+      </button>
+      <span className="flex shrink-0 items-center gap-0.5">
+        <button
+          className={cn(
+            "rounded p-1 text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+            !authorized && "cursor-not-allowed opacity-50",
+          )}
+          data-testid="agent-session-reset-button"
+          disabled={!authorized}
+          onClick={(event) => {
+            event.stopPropagation();
+            onReset();
+          }}
+          title={
+            authorized
+              ? "Reset session: send !rotate to cancel any in-flight turn"
+              : "Only the agent owner can reset sessions"
+          }
+          type="button"
+        >
+          <RotateCcw aria-hidden className="h-3 w-3" />
+        </button>
+        <button
+          className="rounded p-1 text-muted-foreground hover:bg-accent/60 hover:text-destructive"
+          data-testid="agent-session-kill-button"
+          onClick={(event) => {
+            event.stopPropagation();
+            onKill();
+          }}
+          title="Kill session: remove it from the session list"
+          type="button"
+        >
+          <Trash2 aria-hidden className="h-3 w-3" />
+        </button>
       </span>
-      {stuck ? <span className="text-xs text-amber-500">stuck?</span> : null}
-      <span className="shrink-0 text-xs text-muted-foreground">
-        {session.turnCount}t · {relativeTime(session.lastTimestamp)}
-      </span>
-    </button>
+    </div>
   );
 }
 
 /** One agent row with its session list. Owns its hook calls (one per
- * component instance — hooks in a .map() would be invalid React). */
+ * component instance — hooks in a .map() would be invalid React).
+ *
+ * Killed sessions are filtered out before render: the per-agent counter and
+ * the empty state both reflect the visible set, so killing an agent's last
+ * session drops it back to "No observer events yet.". */
 function AgentTreeSection({
   agent,
-  selectedSessionId,
+  killedSessionIds,
+  onKill,
+  onReset,
   onSelect,
+  selectedSessionId,
 }: {
   agent: AgentIdentity;
-  selectedSessionId: string | null;
+  killedSessionIds: Set<string>;
+  onKill: (sessionId: string) => void;
+  onReset: (agentPubkey: string, session: AgentSessionSummary) => void;
   onSelect: (agentPubkey: string, sessionId: string) => void;
+  selectedSessionId: string | null;
 }) {
   const { sessions } = useAgentSessionTree(agent);
+  const identity = useIdentityQuery();
+  const relayAgents = useRelayAgentsQuery();
+  const authorized = isRotateSessionAuthorized(
+    relayAgents.data,
+    identity.data?.pubkey ?? null,
+    agent.pubkey,
+  );
+  const visibleSessions = sessions.filter(
+    (session) => !killedSessionIds.has(session.sessionId),
+  );
   return (
     <div className="mb-3">
       <div className="flex items-center gap-2 px-1 py-1">
@@ -213,16 +285,21 @@ function AgentTreeSection({
         <span className="min-w-0 flex-1 truncate text-sm font-medium">
           {agent.name}
         </span>
-        <span className="text-xs text-muted-foreground">{sessions.length}</span>
+        <span className="text-xs text-muted-foreground">
+          {visibleSessions.length}
+        </span>
       </div>
-      {sessions.length === 0 ? (
+      {visibleSessions.length === 0 ? (
         <p className="px-2 py-1 text-xs text-muted-foreground">
           No observer events yet.
         </p>
       ) : (
-        sessions.map((session) => (
+        visibleSessions.map((session) => (
           <SessionRow
+            authorized={authorized}
             key={session.sessionId}
+            onKill={() => onKill(session.sessionId)}
+            onReset={() => onReset(agent.pubkey, session)}
             onSelect={() => onSelect(agent.pubkey, session.sessionId)}
             selected={selectedSessionId === session.sessionId}
             session={session}
@@ -235,10 +312,84 @@ function AgentTreeSection({
 
 export function AgentSessionsScreen() {
   const agents = useAgentIdentities();
+  const identity = useIdentityQuery();
+  const identityPubkey = identity.data?.pubkey ?? null;
   const [selected, setSelected] = React.useState<{
     agentPubkey: string;
     sessionId: string;
   } | null>(null);
+  const [killedSessionIds, setKilledSessionIds] = React.useState<Set<string>>(
+    new Set(),
+  );
+
+  // Seed the kill list once the identity resolves. localStorage is the
+  // source of truth across runs; the state copy only drives renders.
+  React.useEffect(() => {
+    if (!identityPubkey) return;
+    setKilledSessionIds(readKilledAgentSessions(identityPubkey));
+  }, [identityPubkey]);
+
+  const killSession = React.useCallback(
+    (sessionId: string) => {
+      const confirmed = window.confirm(
+        "Kill this session?\n\n" +
+          "It disappears from the session list on this device. " +
+          "Kill only removes the entry — it does not interrupt a running turn " +
+          "(use Reset for that).",
+      );
+      if (!confirmed) return;
+      recordKilledAgentSession(identityPubkey, sessionId);
+      setKilledSessionIds((prev) => {
+        const next = new Set(prev);
+        next.add(sessionId);
+        return next;
+      });
+      // A killed selected session must not keep its transcript on screen.
+      setSelected((current) =>
+        current?.sessionId === sessionId ? null : current,
+      );
+      toast.success("Session removed from the list.");
+    },
+    [identityPubkey],
+  );
+
+  /**
+   * Reset (formerly the transcript-header button): publishes the harness
+   * `!rotate` owner command into the session's channel. buzz-acp consumes it
+   * owner-side: an in-flight turn is cancelled and the channel session
+   * invalidated; idle channel sessions are dropped immediately — the next
+   * mention starts a fresh session. Rotation is per-channel, matching the
+   * harness contract.
+   */
+  const resetSession = React.useCallback(
+    async (agentPubkey: string, session: AgentSessionSummary) => {
+      if (!session.channelId) {
+        toast.error("No channel known for this session — cannot reset it.");
+        return;
+      }
+      const confirmed = window.confirm(
+        "Reset this agent's channel session?\n\n" +
+          "This sends !rotate to the channel: the harness cancels any in-flight turn and starts the next prompt with a fresh session. " +
+          "Idle sessions are dropped immediately. Only the agent owner can do this.",
+      );
+      if (!confirmed) return;
+      try {
+        await sendChannelMessage(
+          session.channelId,
+          "!rotate",
+          undefined,
+          undefined,
+          [agentPubkey],
+        );
+        toast.success("Reset sent — the session will rotate.");
+      } catch (error) {
+        toast.error(
+          `Reset failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    },
+    [],
+  );
 
   // Observer ingestion is app-wide already (AppShell mounts
   // useAgentObserverIngestion), so per-agent tree reads are cheap store
@@ -263,6 +414,9 @@ export function AgentSessionsScreen() {
           <AgentTreeSection
             agent={agent}
             key={agent.pubkey}
+            killedSessionIds={killedSessionIds}
+            onKill={killSession}
+            onReset={resetSession}
             onSelect={(agentPubkey, sessionId) =>
               setSelected({ agentPubkey, sessionId })
             }
@@ -375,7 +529,6 @@ function SelectedSessionTranscript({
             no token metrics yet
           </span>
         )}
-        <RotateSessionButton agentPubkey={agentPubkey} channelId={channelId} />
       </header>
       <div className="min-h-0 flex-1 overflow-hidden">
         <AgentSessionTranscriptList
@@ -391,83 +544,5 @@ function SelectedSessionTranscript({
         />
       </div>
     </>
-  );
-}
-
-/**
- * Kill/reset control for one session: publishes the harness `!rotate`
- * owner command (kind 9, content exactly "!rotate", agent p-tag mention)
- * into the session's channel. buzz-acp consumes it owner-side: an
- * in-flight turn is cancelled and the channel session invalidated; idle
- * channel sessions are dropped immediately — the next mention starts a
- * fresh session. This is the documented cleanup path for stuck/dead
- * sessions (see LOCAL_MODIFICATIONS BUZZ-ACP notes); rotation is
- * per-channel, matching the harness contract.
- */
-function RotateSessionButton({
-  agentPubkey,
-  channelId,
-}: {
-  agentPubkey: string;
-  channelId: string | null;
-}) {
-  const identity = useIdentityQuery();
-  const relayAgents = useRelayAgentsQuery();
-  const [pending, setPending] = React.useState(false);
-
-  const authorized = isRotateSessionAuthorized(
-    relayAgents.data,
-    identity.data?.pubkey ?? null,
-    agentPubkey,
-  );
-
-  const rotate = React.useCallback(async () => {
-    if (!channelId) {
-      toast.error("No channel known for this session — cannot reset it.");
-      return;
-    }
-    const confirmed = window.confirm(
-      "Reset this agent's channel session?\n\n" +
-        "This sends !rotate to the channel: the harness cancels any in-flight turn and starts the next prompt with a fresh session. " +
-        "Idle sessions are dropped immediately. Only the agent owner can do this.",
-    );
-    if (!confirmed) return;
-    setPending(true);
-    try {
-      await sendChannelMessage(channelId, "!rotate", undefined, undefined, [
-        agentPubkey,
-      ]);
-      toast.success("Reset sent — the session will rotate.");
-    } catch (error) {
-      toast.error(
-        `Reset failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    } finally {
-      setPending(false);
-    }
-  }, [agentPubkey, channelId]);
-
-  return (
-    <button
-      className={cn(
-        "ml-auto flex items-center gap-1 rounded-md border border-border/60 px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground",
-        (!authorized || pending) && "opacity-50",
-      )}
-      disabled={!authorized || pending}
-      onClick={rotate}
-      title={
-        authorized
-          ? "Send !rotate: cancel in-flight turn and reset the channel session"
-          : "Only the agent owner can rotate sessions"
-      }
-      type="button"
-    >
-      {pending ? (
-        <Loader2 aria-hidden className="h-3 w-3 animate-spin" />
-      ) : (
-        <RotateCcw aria-hidden className="h-3 w-3" />
-      )}
-      Reset session
-    </button>
   );
 }
