@@ -44,6 +44,8 @@ import {
 } from "./assignmentOperationFetch";
 import type { ProjectIssue } from "./projectIssues.mjs";
 import {
+  ISSUE_ACTION_REQUIRED_LABEL,
+  isHumanDirectedIssueComment,
   nextProjectIssueCommentCreatedAt,
   projectIssueEventsToIssues,
 } from "./projectIssues.mjs";
@@ -416,10 +418,14 @@ async function createProjectIssueComment({
     ...issue.recipients.map((recipient) => recipient.toLowerCase()),
     ...mentionPubkeys.map((pubkey) => pubkey.toLowerCase()),
   ]);
+  // Human-directed verification/request comments are routed to recipients and
+  // visibly separated from agent evidence without mutating the NIP-34 root.
+  const requiresAction = isHumanDirectedIssueComment(body);
   const tags = [
     ["e", issue.id, "", "root"],
     ["a", project.repoAddress],
     ...[...recipients].map((recipient) => ["p", recipient]),
+    ...(requiresAction ? [["t", ISSUE_ACTION_REQUIRED_LABEL]] : []),
     ...(mediaTags ?? []),
   ];
   const identity = await getIdentity();

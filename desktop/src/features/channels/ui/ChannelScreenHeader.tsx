@@ -1,4 +1,4 @@
-import { LogIn, SquareTerminal } from "lucide-react";
+import { ListTodo, LogIn, SquareTerminal } from "lucide-react";
 import type * as React from "react";
 
 import { ChatHeader } from "@/features/chat/ui/ChatHeader";
@@ -39,12 +39,14 @@ type ChannelScreenHeaderProps = {
   chromeWrapperRef?: React.Ref<HTMLDivElement>;
   currentPubkey?: string;
   isAddBotOpen?: boolean;
+  issuesPanelOpen?: boolean;
   isJoining?: boolean;
   showHeaderContent?: boolean;
   transparentChrome?: boolean;
   onAddBotOpenChange?: (open: boolean) => void;
   onJoinChannel?: () => Promise<void>;
   onManageChannel: () => void;
+  onToggleIssues: () => void;
   onToggleMembers: () => void;
 };
 
@@ -59,12 +61,14 @@ export function ChannelScreenHeader({
   chromeWrapperRef,
   currentPubkey,
   isAddBotOpen,
+  issuesPanelOpen = false,
   isJoining = false,
   onAddBotOpenChange,
   showHeaderContent = true,
   transparentChrome = false,
   onJoinChannel,
   onManageChannel,
+  onToggleIssues,
   onToggleMembers,
 }: ChannelScreenHeaderProps) {
   const isGroupDm =
@@ -119,6 +123,18 @@ export function ChannelScreenHeader({
   const actions = activeChannel ? (
     <div className="flex items-center gap-1">
       {terminalButton}
+      <Button
+        aria-label="Open channel issues"
+        aria-expanded={issuesPanelOpen}
+        data-testid="channel-issues-trigger"
+        onClick={onToggleIssues}
+        size="icon"
+        title="Channel issues"
+        type="button"
+        variant={issuesPanelOpen ? "secondary" : "outline"}
+      >
+        <ListTodo />
+      </Button>
       {channelActions}
     </div>
   ) : null;

@@ -144,6 +144,7 @@ export function ChannelScreen({
     widthPx: threadPanelWidthPx,
   } = useThreadPanelWidth(channelContentWidthPx || undefined);
   const [isMembersSidebarOpen, setIsMembersSidebarOpen] = React.useState(false);
+  const [issuesPanelOpen, setIssuesPanelOpen] = React.useState(false);
   const [isAddBotOpen, setIsAddBotOpen] = React.useState(false);
   const [expandedThreadReplyIds, setExpandedThreadReplyIds] = React.useState(
     () => new Set<string>(),
@@ -672,7 +673,8 @@ export function ChannelScreen({
     effectiveOpenThreadHeadId ||
       openAgentSessionPubkey ||
       profilePanelPubkey ||
-      channelManagementOpen,
+      channelManagementOpen ||
+      issuesPanelOpen,
   );
   const displayedThreadHeadMessage = threadPanelData.threadHead;
   const displayedThreadAllMessages = threadPanelData.messages;
@@ -716,6 +718,7 @@ export function ChannelScreen({
     setThreadReplyTargetId(null);
     handleCloseAgentSession();
     setProfilePanelPubkey(null);
+    setIssuesPanelOpen(false);
     setChannelManagementOpen(true);
   }, [
     activeChannel?.channelType,
@@ -726,6 +729,22 @@ export function ChannelScreen({
     handleCloseAgentSession,
     setProfilePanelPubkey,
   ]);
+  const handleToggleIssues = React.useCallback(() => {
+    setIssuesPanelOpen((open) => !open);
+    setOpenThreadHeadId(null);
+    setProfilePanelPubkey(null);
+    setChannelManagementOpen(false);
+    handleCloseAgentSession();
+  }, [
+    handleCloseAgentSession,
+    setChannelManagementOpen,
+    setOpenThreadHeadId,
+    setProfilePanelPubkey,
+  ]);
+  const handleCloseIssuesPanel = React.useCallback(
+    () => setIssuesPanelOpen(false),
+    [],
+  );
   const handleToggleMembers = React.useCallback(
     () => setIsMembersSidebarOpen((prev) => !prev),
     [],
@@ -743,10 +762,12 @@ export function ChannelScreen({
         chromeWrapperRef={channelHeaderChromeRef}
         currentPubkey={currentPubkey}
         isAddBotOpen={isAddBotOpen}
+        issuesPanelOpen={issuesPanelOpen}
         isJoining={joinChannelMutation.isPending}
         onAddBotOpenChange={setIsAddBotOpen}
         onJoinChannel={joinChannelMutation.mutateAsync}
         onManageChannel={handleManageChannel}
+        onToggleIssues={handleToggleIssues}
         onToggleMembers={handleToggleMembers}
         showHeaderContent={!isSinglePanelView && !isHuddleTranscript}
         transparentChrome={activeChannel?.channelType !== "forum"}
@@ -763,9 +784,11 @@ export function ChannelScreen({
       channelHeaderChromeRef,
       currentPubkey,
       isAddBotOpen,
+      issuesPanelOpen,
       joinChannelMutation.isPending,
       joinChannelMutation.mutateAsync,
       handleManageChannel,
+      handleToggleIssues,
       handleToggleMembers,
       isSinglePanelView,
       isHuddleTranscript,
@@ -841,6 +864,7 @@ export function ChannelScreen({
                   onAutoSendComplete={clearAutoSend}
                   botTypingEntries={botTypingEntries}
                   channelManagementOpen={channelManagementOpen}
+                  issuesPanelOpen={issuesPanelOpen}
                   currentPubkey={currentPubkey}
                   canResetThreadPanelWidth={canResetThreadPanelWidth}
                   fetchOlder={fetchOlder}
@@ -900,6 +924,7 @@ export function ChannelScreen({
                       : undefined
                   }
                   onCloseChannelManagement={handleCloseChannelManagement}
+                  onCloseIssuesPanel={handleCloseIssuesPanel}
                   onCloseThread={handleCloseThread}
                   onDelete={
                     activeChannel?.archivedAt ? undefined : handleDelete

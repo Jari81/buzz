@@ -36,6 +36,7 @@ export type ChannelPaneProps = {
   onAutoSendComplete?: (() => void) | null;
   botTypingEntries: TypingIndicatorEntry[];
   channelManagementOpen?: boolean;
+  issuesPanelOpen?: boolean;
   currentPubkey?: string;
   editTarget?: {
     author: string;
@@ -78,6 +79,7 @@ export type ChannelPaneProps = {
   onBackFromAgentSession?: () => void;
   onCloseAgentSession: () => void;
   onCloseChannelManagement?: () => void;
+  onCloseIssuesPanel?: () => void;
   onChannelManagementDeleted?: () => void;
   onCloseProfilePanel: () => void;
   onAddAgent?: (options?: { beforeSend?: () => void }) => void;

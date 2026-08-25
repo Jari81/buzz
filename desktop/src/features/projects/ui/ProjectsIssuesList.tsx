@@ -1,3 +1,4 @@
+import * as React from "react";
 import { Eye, MessageSquare } from "lucide-react";
 
 import type {
@@ -24,7 +25,6 @@ import { ProjectEventTypeIcon } from "./ProjectEventTypeIcon";
 import { ProjectListRowMenu } from "./ProjectListRowMenu";
 import { ProjectsWorkItemsLoadNotice } from "./ProjectsWorkItemsLoadNotice";
 import {
-  PROJECT_LIST_CONTAINER_CLASS,
   PROJECT_LIST_ROW_CLASS,
   PROJECT_LIST_ROW_CONTENT_CLASS,
   PROJECT_LIST_ROW_DATE_CLASS,
@@ -84,6 +84,9 @@ function IssueHeader({
     <div className="-mt-0.5 min-w-0 flex-1">
       <div className="flex min-w-0 items-center gap-1.5">
         <p className={PROJECT_LIST_ROW_TITLE_CLASS}>{issue.title}</p>
+        <code className="shrink-0 rounded bg-muted/50 px-1 py-0.5 text-2xs text-muted-foreground">
+          ISS-{issue.id.slice(0, 8).toUpperCase()}
+        </code>
       </div>
       {/* Flex (not inline flow) so the 20px author avatar cannot grow the
           line box — keeps row heights identical to the PR list. */}
@@ -259,6 +262,120 @@ function IssueListRow({
   );
 }
 
+const ISSUE_STATUS_SECTIONS = [
+  { status: "Triage", label: "Triage", terminal: false },
+  { status: "In Review", label: "Review", terminal: false },
+  { status: "Approved", label: "Approved", terminal: false },
+  { status: "In Progress", label: "In Progress", terminal: false },
+  { status: "Backlog", label: "Backlog", terminal: false },
+  { status: "Done", label: "Done", terminal: true },
+  { status: "Closed", label: "Closed", terminal: true },
+] as const;
+
+function IssueStatusSection({
+  embedded,
+  items,
+  label,
+  limit,
+  onOpen,
+  profiles,
+  status,
+  terminal,
+  viewMode,
+}: {
+  embedded: boolean;
+  items: ProjectIssueListItem[];
+  label: string;
+  limit: number;
+  onOpen: ProjectsIssuesListProps["onOpen"];
+  profiles?: UserProfileLookup;
+  status: string;
+  terminal: boolean;
+  viewMode: ProjectsIssuesListProps["viewMode"];
+}) {
+  const [expanded, setExpanded] = React.useState(!terminal);
+  const [showAll, setShowAll] = React.useState(false);
+  const visibleItems = expanded
+    ? showAll
+      ? items
+      : items.slice(0, limit)
+    : [];
+
+  if (items.length === 0) return null;
+
+  return (
+    <section
+      className="space-y-2"
+      data-testid={`projects-issues-status-${status}`}
+    >
+      <div className="flex items-center justify-between px-1">
+        <h2 className="text-sm font-semibold text-foreground">
+          {label} <span className="text-muted-foreground">{items.length}</span>
+        </h2>
+        <div className="flex items-center gap-1">
+          {terminal ? (
+            <Button
+              aria-expanded={expanded}
+              onClick={() => setExpanded((value) => !value)}
+              size="xs"
+              type="button"
+              variant="ghost"
+            >
+              {expanded ? "Collapse" : "Expand"}
+            </Button>
+          ) : null}
+          {expanded && items.length > limit ? (
+            <Button
+              aria-expanded={showAll}
+              onClick={() => setShowAll((value) => !value)}
+              size="xs"
+              type="button"
+              variant="ghost"
+            >
+              {showAll ? "Show less" : `Show ${items.length - limit} more`}
+            </Button>
+          ) : null}
+        </div>
+      </div>
+      <div
+        className={
+          viewMode === "grid"
+            ? "grid gap-3 md:grid-cols-2 xl:grid-cols-3"
+            : embedded
+              ? "divide-y divide-border/60"
+              : "divide-y divide-border/60 overflow-hidden rounded-xl border border-border/60"
+        }
+      >
+        {visibleItems.map(({ project, issue, repository }) =>
+          viewMode === "grid" ? (
+            <IssueGridCard
+              issue={issue}
+              key={`${repository.id}:${issue.id}`}
+              onOpen={(selectedProject, selectedIssue) =>
+                onOpen(selectedProject, repository, selectedIssue)
+              }
+              profiles={profiles}
+              project={project}
+              repository={repository}
+            />
+          ) : (
+            <IssueListRow
+              issue={issue}
+              key={`${repository.id}:${issue.id}`}
+              onOpen={(selectedProject, selectedIssue) =>
+                onOpen(selectedProject, repository, selectedIssue)
+              }
+              profiles={profiles}
+              project={project}
+              repository={repository}
+            />
+          ),
+        )}
+      </div>
+    </section>
+  );
+}
+
 export function ProjectsIssuesList({
   embedded,
   error,
@@ -271,6 +388,28 @@ export function ProjectsIssuesList({
   profiles,
   viewMode,
 }: ProjectsIssuesListProps) {
+  const [limit, setLimit] = React.useState(() => {
+    const stored = Number(
+      globalThis.localStorage?.getItem("buzz.projects.issueRows"),
+    );
+    return stored === 10 || stored === 20 ? stored : 5;
+  });
+  const issuesByStatus = React.useMemo(
+    () =>
+      new Map(
+        ISSUE_STATUS_SECTIONS.map(({ status }) => [
+          status,
+          issues.filter(({ issue }) => issue.status === status),
+        ]),
+      ),
+    [issues],
+  );
+
+  const changeLimit = (value: number) => {
+    setLimit(value);
+    globalThis.localStorage?.setItem("buzz.projects.issueRows", String(value));
+  };
+
   if (isLoading) {
     return (
       <div
@@ -314,50 +453,36 @@ export function ProjectsIssuesList({
     );
   }
 
-  if (viewMode === "grid") {
-    return (
-      <div className="space-y-3">
-        {loadNotice}
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {issues.map(({ project, issue, repository }) => (
-            <IssueGridCard
-              issue={issue}
-              key={`${repository.id}:${issue.id}`}
-              onOpen={(selectedProject, selectedIssue) =>
-                onOpen(selectedProject, repository, selectedIssue)
-              }
-              profiles={profiles}
-              project={project}
-              repository={repository}
-            />
-          ))}
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="space-y-3">
+    <div className="space-y-5">
       {loadNotice}
-      <div
-        className={
-          embedded ? "divide-y divide-border/60" : PROJECT_LIST_CONTAINER_CLASS
-        }
-        data-testid="projects-list-container"
-      >
-        {issues.map(({ project, issue, repository }) => (
-          <IssueListRow
-            issue={issue}
-            key={`${repository.id}:${issue.id}`}
-            onOpen={(selectedProject, selectedIssue) =>
-              onOpen(selectedProject, repository, selectedIssue)
-            }
-            profiles={profiles}
-            project={project}
-            repository={repository}
-          />
-        ))}
+      <div className="flex items-center justify-end gap-2 text-xs text-muted-foreground">
+        <label htmlFor="projects-issue-rows">Rows per status</label>
+        <select
+          className="h-8 rounded-md bg-transparent px-2 text-xs text-foreground outline-hidden hover:bg-muted/50 focus:ring-1 focus:ring-ring"
+          id="projects-issue-rows"
+          onChange={(event) => changeLimit(Number(event.target.value))}
+          value={limit}
+        >
+          <option value={5}>5</option>
+          <option value={10}>10</option>
+          <option value={20}>20</option>
+        </select>
       </div>
+      {ISSUE_STATUS_SECTIONS.map(({ label, status, terminal }) => (
+        <IssueStatusSection
+          embedded={Boolean(embedded)}
+          items={issuesByStatus.get(status) ?? []}
+          key={status}
+          label={label}
+          limit={limit}
+          onOpen={onOpen}
+          profiles={profiles}
+          status={status}
+          terminal={terminal}
+          viewMode={viewMode}
+        />
+      ))}
     </div>
   );
 }

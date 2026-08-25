@@ -7,11 +7,17 @@ import { sortEvents } from "../../shared/api/relayClientShared.ts";
 // assignee's mention feed (inbox) for free.
 export const ISSUE_ASSIGNMENT_LABEL = "assignment";
 export const ISSUE_UNASSIGNMENT_LABEL = "unassignment";
+export const ISSUE_ACTION_REQUIRED_LABEL = "action-required";
+
+export function isHumanDirectedIssueComment(body) {
+  return /^(?:test|expected|reply)\s*:/i.test(body.trimStart());
+}
 
 export const PROJECT_ISSUE_STATUS = {
   TRIAGE: "Triage",
   BACKLOG: "Backlog",
   IN_PROGRESS: "In Progress",
+  APPROVED: "Approved",
   IN_REVIEW: "In Review",
   DONE: "Done",
   CLOSED: "Closed",
@@ -77,7 +83,11 @@ function statusFromEvent(issue, statusEvent) {
   // label-based fallbacks below are client-side heuristics, not protocol.
   if (statusEvent?.kind === 1633) return PROJECT_ISSUE_STATUS.TRIAGE;
 
-  const labels = getAllTags(issue, "t").map((label) => label.toLowerCase());
+  const labels = [
+    ...getAllTags(issue, "t"),
+    ...(statusEvent ? getAllTags(statusEvent, "t") : []),
+  ].map((label) => label.toLowerCase());
+  if (labels.includes("approved")) return PROJECT_ISSUE_STATUS.APPROVED;
   if (labels.includes("in-review") || labels.includes("review")) {
     return PROJECT_ISSUE_STATUS.IN_REVIEW;
   }
@@ -179,6 +189,10 @@ function commentsForIssue(issueCommentEvents) {
     tags: getImetaTags(event),
     author: event.pubkey,
     createdAt: event.created_at,
+    recipients: getAllTags(event, "p"),
+    actionRequired: getAllTags(event, "t").includes(
+      ISSUE_ACTION_REQUIRED_LABEL,
+    ),
   }));
 }
 

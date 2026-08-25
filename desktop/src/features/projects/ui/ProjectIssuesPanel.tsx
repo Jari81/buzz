@@ -1,6 +1,7 @@
 import {
   Check,
   ChevronDown,
+  ChevronRight,
   CircleCheck,
   CircleDot,
   CircleX,
@@ -59,6 +60,25 @@ export function issueStatusClassName(status: ProjectIssue["status"]) {
   if (status === "Done") return "text-purple-400";
   if (status === "Closed") return "text-destructive";
   return "text-green-500";
+}
+
+const ISSUE_STATUS_SECTIONS = [
+  { status: "Triage", label: "Triage", terminal: false },
+  { status: "In Review", label: "Review", terminal: false },
+  { status: "Approved", label: "Approved", terminal: false },
+  { status: "In Progress", label: "In Progress", terminal: false },
+  { status: "Backlog", label: "Backlog", terminal: false },
+  { status: "Done", label: "Done", terminal: true },
+  { status: "Closed", label: "Closed", terminal: true },
+] as const;
+
+const ISSUE_ROWS_PER_GROUP_STORAGE_KEY = "buzz.projects.issueRows";
+
+function readIssueRowsPerGroup(): number {
+  const stored = Number(
+    globalThis.localStorage?.getItem(ISSUE_ROWS_PER_GROUP_STORAGE_KEY),
+  );
+  return stored === 10 || stored === 20 ? stored : 5;
 }
 
 function issueStatusVisual(status: ProjectIssue["status"]) {
@@ -164,7 +184,7 @@ function IssueRow({
           ) : null}
           <ProjectFeedRowCluster>
             <ProjectFeedRowMonoCell
-              label={`#${issue.id.slice(0, 8)}`}
+              label={`ISS-${issue.id.slice(0, 8).toUpperCase()}`}
               onClick={onOpen}
               title="View issue"
             />
@@ -245,7 +265,7 @@ export function ProjectIssueDetail({
             <h3 className="mt-1 line-clamp-2 text-base font-semibold text-foreground">
               {issue.title}{" "}
               <span className="font-normal text-muted-foreground">
-                #{issue.id.slice(0, 8)}
+                ISS-{issue.id.slice(0, 8).toUpperCase()}
               </span>
               <ShareLinkButton
                 className="ml-1 inline-flex h-6 w-6 align-text-bottom"
@@ -496,6 +516,7 @@ export function ProjectIssuesPanel({
 }) {
   const issuesQuery = useProjectIssuesQuery(project);
   const issues = issuesQuery.data ?? [];
+  const [rowsPerGroup, setRowsPerGroup] = React.useState(readIssueRowsPerGroup);
   const selectedIssue =
     issues.find((issue) => issue.id === selectedIssueId) ?? null;
 
@@ -523,16 +544,126 @@ export function ProjectIssuesPanel({
     );
   }
 
+  const changeRowsPerGroup = (value: number) => {
+    setRowsPerGroup(value);
+    globalThis.localStorage?.setItem(
+      ISSUE_ROWS_PER_GROUP_STORAGE_KEY,
+      String(value),
+    );
+  };
+
   return (
-    <div className="divide-y divide-border/50">
-      {issues.map((issue) => (
-        <IssueRow
-          issue={issue}
-          key={issue.id}
-          onOpen={() => onSelectedIssueIdChange(issue.id)}
-          profiles={profiles}
-        />
-      ))}
+    <div className="space-y-4 p-2">
+      <div className="flex items-center justify-end gap-2 px-2 text-xs text-muted-foreground">
+        <label htmlFor="channel-issue-rows">Rows per status</label>
+        <select
+          className="h-8 rounded-md bg-transparent px-2 text-xs text-foreground outline-hidden hover:bg-muted/50 focus:ring-1 focus:ring-ring"
+          id="channel-issue-rows"
+          onChange={(event) => changeRowsPerGroup(Number(event.target.value))}
+          value={rowsPerGroup}
+        >
+          <option value={5}>5</option>
+          <option value={10}>10</option>
+          <option value={20}>20</option>
+        </select>
+      </div>
+      {ISSUE_STATUS_SECTIONS.map(({ label, status, terminal }) => {
+        const sectionIssues = issues.filter((issue) => issue.status === status);
+        if (sectionIssues.length === 0) return null;
+        return (
+          <IssueStatusSection
+            issues={sectionIssues}
+            key={status}
+            label={label}
+            onOpen={onSelectedIssueIdChange}
+            profiles={profiles}
+            rowsPerGroup={rowsPerGroup}
+            terminal={terminal}
+          />
+        );
+      })}
     </div>
+  );
+}
+
+function IssueStatusSection({
+  issues,
+  label,
+  onOpen,
+  profiles,
+  rowsPerGroup,
+  terminal,
+}: {
+  issues: ProjectIssue[];
+  label: string;
+  onOpen: (id: string | null) => void;
+  profiles?: UserProfileLookup;
+  rowsPerGroup: number;
+  terminal: boolean;
+}) {
+  const [expanded, setExpanded] = React.useState(!terminal);
+  const [showAll, setShowAll] = React.useState(false);
+  const visibleIssues = expanded
+    ? showAll
+      ? issues
+      : issues.slice(0, rowsPerGroup)
+    : [];
+  const remaining = issues.length - visibleIssues.length;
+
+  return (
+    <section>
+      <div className="flex items-center justify-between px-2 py-1.5">
+        {terminal ? (
+          <button
+            aria-expanded={expanded}
+            className="flex items-center gap-1 text-xs font-semibold text-muted-foreground hover:text-foreground"
+            onClick={() => setExpanded((value) => !value)}
+            type="button"
+          >
+            {expanded ? (
+              <ChevronDown className="h-3.5 w-3.5" />
+            ) : (
+              <ChevronRight className="h-3.5 w-3.5" />
+            )}
+            {label} · {issues.length}
+          </button>
+        ) : (
+          <h3 className="text-xs font-semibold text-muted-foreground">
+            {label} · {issues.length}
+          </h3>
+        )}
+        {expanded && remaining > 0 ? (
+          <button
+            aria-expanded={showAll}
+            className="text-xs text-muted-foreground hover:text-foreground"
+            onClick={() => setShowAll(true)}
+            type="button"
+          >
+            Show {remaining} more
+          </button>
+        ) : expanded && showAll ? (
+          <button
+            aria-expanded={showAll}
+            className="text-xs text-muted-foreground hover:text-foreground"
+            onClick={() => setShowAll(false)}
+            type="button"
+          >
+            Show less
+          </button>
+        ) : null}
+      </div>
+      {expanded ? (
+        <div className="divide-y divide-border/50 overflow-hidden rounded-lg border border-border/50">
+          {visibleIssues.map((issue) => (
+            <IssueRow
+              issue={issue}
+              key={issue.id}
+              onOpen={() => onOpen(issue.id)}
+              profiles={profiles}
+            />
+          ))}
+        </div>
+      ) : null}
+    </section>
   );
 }

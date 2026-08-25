@@ -8,6 +8,7 @@ const ISSUE_COMMENTS = [
   "Third issue comment",
   "Fourth issue comment",
 ];
+const ACTION_COMMENT = "Test: verify the Windows installer launches.";
 
 async function openBuzzProject(page: import("@playwright/test").Page) {
   await page.goto("/", { waitUntil: "domcontentloaded" });
@@ -22,14 +23,16 @@ async function openBuzzProject(page: import("@playwright/test").Page) {
   await projectEntry.click();
 }
 
-test("issue comments use the project activity timeline", async ({ page }) => {
+test("issue comments keep technical evidence collapsed and surface human actions", async ({
+  page,
+}) => {
   await installMockBridge(page);
   await openBuzzProject(page);
 
   await page.getByRole("tab", { name: "Issues", exact: true }).click();
   const issueRow = page.getByTestId("project-issue-row").first();
   await expect(issueRow).toBeVisible({ timeout: 10_000 });
-  await issueRow.getByRole("button", { name: /^#/ }).click();
+  await issueRow.getByRole("button", { name: /^ISS-/ }).click();
 
   const composer = page.getByTestId("project-issue-comment-composer");
   await expect(composer).toBeVisible();
@@ -37,38 +40,76 @@ test("issue comments use the project activity timeline", async ({ page }) => {
   for (const comment of ISSUE_COMMENTS) {
     await composer.locator('[contenteditable="true"]').fill(comment);
     await composer.getByRole("button", { name: "Send message" }).click();
-    await expect(page.getByText(comment, { exact: true })).toBeVisible({
-      timeout: 10_000,
-    });
+    await expect(composer.locator('[contenteditable="true"]')).toBeEmpty();
   }
+  await composer.locator('[contenteditable="true"]').fill(ACTION_COMMENT);
+  await composer.getByRole("button", { name: "Send message" }).click();
+  await expect(page.getByText(ACTION_COMMENT, { exact: true })).toBeVisible({
+    timeout: 10_000,
+  });
 
   const timelineRows = page.getByTestId("project-issue-comment-timeline-row");
-  const earlierComments = page.getByTestId("project-issue-earlier-comments");
+  const technicalEvidence = page.getByTestId(
+    "project-issue-technical-evidence-toggle",
+  );
   const historyToggle = page.getByTestId(
     "project-issue-comment-history-toggle",
   );
 
-  await expect(timelineRows).toHaveCount(3);
-  await expect(earlierComments).toContainText("Show 1 earlier comment");
+  await expect(timelineRows).toHaveCount(4);
+  const actionRow = timelineRows.filter({ hasText: ACTION_COMMENT });
+  await expect(actionRow).toHaveCount(1);
+  await expect(actionRow).toContainText("Action required");
+  await expect(technicalEvidence).toContainText(
+    "Show 1 earlier technical evidence comment",
+  );
   await expect(
     timelineRows.filter({ hasText: "First issue comment" }),
   ).toHaveCount(0);
-  await expect(
-    timelineRows.filter({ hasText: "Fourth issue comment" }),
-  ).toHaveCount(1);
 
-  await earlierComments.click();
-  await expect(timelineRows).toHaveCount(4);
+  await technicalEvidence.click();
+  await expect(timelineRows).toHaveCount(5);
   for (const comment of ISSUE_COMMENTS) {
     await expect(timelineRows.filter({ hasText: comment })).toHaveCount(1);
   }
 
   await historyToggle.click();
   await expect(timelineRows).toHaveCount(0);
-  await expect(historyToggle).toContainText("Show 4 earlier comments");
+  await expect(historyToggle).toContainText("Show 5 earlier comments");
 
   await historyToggle.click();
-  await expect(timelineRows).toHaveCount(4);
+  await expect(timelineRows).toHaveCount(5);
+
+  const actionEvent = await page.evaluate(() =>
+    window.__BUZZ_E2E_SIGNED_EVENTS__?.find(
+      (event) =>
+        event.kind === 1 &&
+        event.content === "Test: verify the Windows installer launches.",
+    ),
+  );
+  expect(actionEvent?.tags).toContainEqual(["t", "action-required"]);
+  expect(actionEvent?.tags.some((tag) => tag[0] === "p")).toBe(true);
+});
+
+test("channel issue detail has a back path to the scoped issue list", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("channel-general").click();
+  await page.getByTestId("channel-issues-trigger").click();
+
+  const panel = page.getByTestId("channel-issues-auxiliary-pane");
+  await expect(panel).toBeVisible();
+  const issueRow = panel.getByTestId("project-issue-row").first();
+  await expect(issueRow).toBeVisible({ timeout: 10_000 });
+  await issueRow.getByRole("button", { name: /^ISS-/ }).click();
+  await expect(
+    panel.getByRole("button", { name: "Back to issues" }),
+  ).toBeVisible();
+
+  await panel.getByRole("button", { name: "Back to issues" }).click();
+  await expect(panel.getByTestId("project-issue-row").first()).toBeVisible();
 });
 
 test("issue assignees can be assigned and unassigned", async ({ page }) => {
@@ -78,7 +119,7 @@ test("issue assignees can be assigned and unassigned", async ({ page }) => {
   await page.getByRole("tab", { name: "Issues", exact: true }).click();
   const issueRow = page.getByTestId("project-issue-row").first();
   await expect(issueRow).toBeVisible({ timeout: 10_000 });
-  await issueRow.getByRole("button", { name: /^#/ }).click();
+  await issueRow.getByRole("button", { name: /^ISS-/ }).click();
 
   await page.getByTestId("project-issue-assign").click();
   const candidate = page
@@ -105,7 +146,7 @@ test("issue status can be changed from the detail rail", async ({ page }) => {
   await page.getByRole("tab", { name: "Issues", exact: true }).click();
   const issueRow = page.getByTestId("project-issue-row").first();
   await expect(issueRow).toBeVisible({ timeout: 10_000 });
-  await issueRow.getByRole("button", { name: /^#/ }).click();
+  await issueRow.getByRole("button", { name: /^ISS-/ }).click();
 
   const trigger = page.getByTestId("project-issue-status-trigger");
   await expect(trigger).toBeVisible({ timeout: 10_000 });
@@ -127,7 +168,11 @@ test("issue status can be changed from the detail rail", async ({ page }) => {
   // The rail reflects the new status without a reload.
   await expect(trigger).toContainText("Done", { timeout: 10_000 });
 
+  await page.keyboard.press("Escape");
   await trigger.click();
+  await expect(
+    page.getByTestId("project-issue-status-option-closed"),
+  ).toBeVisible();
   await page.getByTestId("project-issue-status-option-closed").click();
   await expect(trigger).toContainText("Closed", { timeout: 10_000 });
 });

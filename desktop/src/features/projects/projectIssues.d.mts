@@ -4,6 +4,7 @@ export type ProjectIssueStatus =
   | "Triage"
   | "Backlog"
   | "In Progress"
+  | "Approved"
   | "In Review"
   | "Done"
   | "Closed";
@@ -14,6 +15,8 @@ export type ProjectIssueComment = {
   tags: string[][];
   author: string;
   createdAt: number;
+  recipients: string[];
+  actionRequired: boolean;
 };
 
 export type ProjectIssue = {
@@ -39,11 +42,14 @@ export type ProjectIssue = {
 
 export const ISSUE_ASSIGNMENT_LABEL: "assignment";
 export const ISSUE_UNASSIGNMENT_LABEL: "unassignment";
+export const ISSUE_ACTION_REQUIRED_LABEL: "action-required";
+export function isHumanDirectedIssueComment(body: string): boolean;
 
 export const PROJECT_ISSUE_STATUS: {
   TRIAGE: "Triage";
   BACKLOG: "Backlog";
   IN_PROGRESS: "In Progress";
+  APPROVED: "Approved";
   IN_REVIEW: "In Review";
   DONE: "Done";
   CLOSED: "Closed";

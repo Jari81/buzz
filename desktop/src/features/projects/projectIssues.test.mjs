@@ -6,6 +6,8 @@ import {
   eventToProjectIssue,
   getAllTags,
   getTag,
+  isHumanDirectedIssueComment,
+  ISSUE_ACTION_REQUIRED_LABEL,
   ISSUE_ASSIGNMENT_LABEL,
   ISSUE_UNASSIGNMENT_LABEL,
   nextProjectIssueCommentCreatedAt,
@@ -211,6 +213,60 @@ test("preserves root and comment tags for rich content rendering", () => {
 
   assert.deepEqual(issue.tags, [root.tags[2]]);
   assert.deepEqual(issue.comments[0].tags, [comment.tags[1]]);
+});
+
+test("recognizes approved status-event labels and action-required comment metadata", () => {
+  const root = issueEvent({
+    tags: [
+      ["a", REPO_ADDRESS],
+      ["subject", "Something is broken"],
+    ],
+  });
+  const approved = {
+    id: "approved-status",
+    kind: 1630,
+    pubkey: OWNER,
+    created_at: 150,
+    content: "",
+    tags: [
+      ["e", root.id, "", "root"],
+      ["a", REPO_ADDRESS],
+      ["t", "approved"],
+    ],
+  };
+  const comment = {
+    id: "comment-action-required",
+    kind: 1,
+    pubkey: OWNER,
+    created_at: 200,
+    content: "Test: verify the Windows installer",
+    tags: [
+      ["e", root.id, "", "root"],
+      ["p", AUTHOR],
+      ["t", ISSUE_ACTION_REQUIRED_LABEL],
+    ],
+  };
+
+  const issue = eventToProjectIssue(root, [approved], [comment]);
+
+  assert.equal(issue.status, PROJECT_ISSUE_STATUS.APPROVED);
+  assert.equal(issue.comments[0].actionRequired, true);
+  assert.deepEqual(issue.comments[0].recipients, [AUTHOR]);
+});
+
+test("human-directed issue comments require a leading action prefix", () => {
+  assert.equal(
+    isHumanDirectedIssueComment("Test: verify the Windows installer"),
+    true,
+  );
+  assert.equal(
+    isHumanDirectedIssueComment("Evidence:\nExpected: HTTP 200"),
+    false,
+  );
+  assert.equal(
+    isHumanDirectedIssueComment("Build passed\nReply: not requested"),
+    false,
+  );
 });
 
 test("parses public and private-safe issue provenance", () => {

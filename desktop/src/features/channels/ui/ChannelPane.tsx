@@ -31,6 +31,7 @@ import { useComposerHeightPadding } from "@/features/messages/ui/useComposerHeig
 import { UserProfilePanel } from "@/features/profile/ui/UserProfilePanel";
 import { AgentSessionThreadPanel } from "@/features/channels/ui/AgentSessionThreadPanel";
 import { ChannelManagementAuxiliaryPanel } from "@/features/channels/ui/ChannelManagementAuxiliaryPanel";
+import { ChannelIssuesAuxiliaryPanel } from "@/features/channels/ui/ChannelIssuesAuxiliaryPanel";
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
 import { ThreadViewModeToggle } from "@/features/channels/ui/ThreadViewModeToggle";
 import { FocusThreadDrawer } from "@/features/channels/ui/FocusThreadDrawer";
@@ -79,6 +80,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   onAutoSendComplete = null,
   botTypingEntries,
   channelManagementOpen = false,
+  issuesPanelOpen = false,
   currentPubkey,
   editTarget = null,
   fetchOlder,
@@ -109,6 +111,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   onBackFromAgentSession,
   onCloseAgentSession,
   onCloseChannelManagement,
+  onCloseIssuesPanel,
   onChannelManagementDeleted,
   onCloseProfilePanel,
   onAddAgent,
@@ -405,8 +408,7 @@ export const ChannelPane = React.memo(function ChannelPane({
     if (!isDmChannel || !channelContextUsage) return null;
     const { usageRatio, model, lastInputTokens, contextWindow } =
       channelContextUsage;
-    const pct =
-      usageRatio == null ? null : Math.round(usageRatio * 100);
+    const pct = usageRatio == null ? null : Math.round(usageRatio * 100);
     const label = [
       model ?? "unknown model",
       pct == null ? "no usage data" : `${pct}% context used`,
@@ -516,7 +518,8 @@ export const ChannelPane = React.memo(function ChannelPane({
   );
   const hasSplitAuxiliaryPane =
     useSplitAuxiliaryPane &&
-    (channelManagementOpen ||
+    (issuesPanelOpen ||
+      channelManagementOpen ||
       Boolean(threadHeadMessage) ||
       shouldShowThreadSkeleton ||
       Boolean(activeChannel && selectedAgent) ||
@@ -802,7 +805,18 @@ export const ChannelPane = React.memo(function ChannelPane({
        * frozen snapshot because the panel is fully prop-driven.
        */}
       <AnimatePresence onExitComplete={markExitComplete}>
-        {channelManagementOpen && activeChannel ? (
+        {issuesPanelOpen && activeChannel ? (
+          <ChannelIssuesAuxiliaryPanel
+            activeChannel={activeChannel}
+            canResetWidth={canResetThreadPanelWidth}
+            key="channel-issues-panel"
+            onClose={() => onCloseIssuesPanel?.()}
+            onResetWidth={onResetThreadPanelWidth}
+            onResizeStart={onThreadPanelResizeStart}
+            profiles={profiles}
+            widthPx={threadPanelWidthPx}
+          />
+        ) : channelManagementOpen && activeChannel ? (
           <ChannelManagementAuxiliaryPanel
             activeChannel={activeChannel}
             canResetThreadPanelWidth={canResetThreadPanelWidth}

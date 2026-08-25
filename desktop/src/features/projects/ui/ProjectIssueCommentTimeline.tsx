@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronUp, History } from "lucide-react";
+import { CircleAlert, ChevronDown, ChevronUp, History } from "lucide-react";
 import * as React from "react";
 
 import type { ProjectIssue } from "@/features/projects/hooks";
@@ -16,7 +16,7 @@ import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { ProfileAuthorName } from "./ProjectProfileIdentity";
 import { ProjectRichContent } from "./ProjectRichContent";
 
-const COLLAPSED_COMMENT_COUNT = 3;
+const COLLAPSED_TECHNICAL_EVIDENCE_COUNT = 3;
 
 export function ProjectIssueCommentTimeline({
   comments,
@@ -26,7 +26,8 @@ export function ProjectIssueCommentTimeline({
   profiles?: UserProfileLookup;
 }) {
   const [isCollapsed, setIsCollapsed] = React.useState(false);
-  const [isExpanded, setIsExpanded] = React.useState(false);
+  const [technicalEvidenceExpanded, setTechnicalEvidenceExpanded] =
+    React.useState(false);
   const orderedComments = React.useMemo(
     () =>
       [...comments].sort(
@@ -35,15 +36,27 @@ export function ProjectIssueCommentTimeline({
       ),
     [comments],
   );
-  const earlierCommentCount = Math.max(
-    0,
-    orderedComments.length - COLLAPSED_COMMENT_COUNT,
+  const actionComments = orderedComments.filter(
+    (comment) => comment.actionRequired,
   );
-  const visibleComments =
-    isExpanded || earlierCommentCount === 0
-      ? orderedComments
-      : orderedComments.slice(-COLLAPSED_COMMENT_COUNT);
-  const displayedComments = isCollapsed ? [] : visibleComments;
+  const technicalEvidence = orderedComments.filter(
+    (comment) => !comment.actionRequired,
+  );
+  const earlierTechnicalEvidenceCount = Math.max(
+    0,
+    technicalEvidence.length - COLLAPSED_TECHNICAL_EVIDENCE_COUNT,
+  );
+  const visibleTechnicalEvidence = technicalEvidenceExpanded
+    ? technicalEvidence
+    : technicalEvidence.slice(-COLLAPSED_TECHNICAL_EVIDENCE_COUNT);
+  const visibleCommentIds = new Set(
+    [...actionComments, ...visibleTechnicalEvidence].map(
+      (comment) => comment.id,
+    ),
+  );
+  const displayedComments = isCollapsed
+    ? []
+    : orderedComments.filter((comment) => visibleCommentIds.has(comment.id));
 
   if (orderedComments.length === 0) {
     return null;
@@ -78,21 +91,29 @@ export function ProjectIssueCommentTimeline({
         )}
       </button>
 
-      {!isCollapsed && earlierCommentCount > 0 && !isExpanded ? (
+      {!isCollapsed &&
+      (earlierTechnicalEvidenceCount > 0 || technicalEvidenceExpanded) ? (
         <button
+          aria-expanded={technicalEvidenceExpanded}
           className="flex min-h-10 w-full items-center gap-2 py-2.5 text-sm font-semibold text-muted-foreground transition-colors hover:text-foreground"
-          data-testid="project-issue-earlier-comments"
-          onClick={() => setIsExpanded(true)}
+          data-testid="project-issue-technical-evidence-toggle"
+          onClick={() => setTechnicalEvidenceExpanded((current) => !current)}
           type="button"
         >
           <span className="relative flex w-5 shrink-0 justify-center self-stretch">
             <span className="absolute top-2.5 -bottom-[1.875rem] w-px bg-border/80" />
             <span className="relative z-10 flex h-5 w-5 items-center justify-center rounded-full bg-background ring-1 ring-border/70">
-              <ChevronDown className="h-3 w-3" />
+              {technicalEvidenceExpanded ? (
+                <ChevronUp className="h-3 w-3" />
+              ) : (
+                <ChevronDown className="h-3 w-3" />
+              )}
             </span>
           </span>
           <span className="min-w-0 flex-1 text-left">
-            Show {pluralize(earlierCommentCount, "earlier comment")}
+            {technicalEvidenceExpanded
+              ? "Show less technical evidence"
+              : `Show ${pluralize(earlierTechnicalEvidenceCount, "earlier technical evidence comment")}`}
           </span>
         </button>
       ) : null}
@@ -104,7 +125,11 @@ export function ProjectIssueCommentTimeline({
         });
         return (
           <div
-            className="flex min-h-10 min-w-0 items-start gap-2 py-2.5 text-sm text-muted-foreground"
+            className={`flex min-h-10 min-w-0 items-start gap-2 rounded-md py-2.5 text-sm text-muted-foreground ${
+              comment.actionRequired
+                ? "bg-primary/10 px-2 ring-1 ring-primary/30"
+                : ""
+            }`}
             data-testid="project-issue-comment-timeline-row"
             key={comment.id}
           >
@@ -131,6 +156,12 @@ export function ProjectIssueCommentTimeline({
                     {authorLabel}
                   </ProfileAuthorName>
                 </span>
+                {comment.actionRequired ? (
+                  <span className="mr-2 inline-flex shrink-0 items-center gap-1 rounded-full bg-primary/15 px-1.5 py-0.5 text-2xs font-medium text-primary">
+                    <CircleAlert className="h-3 w-3" />
+                    Action required
+                  </span>
+                ) : null}
                 <span
                   className="ml-auto w-20 shrink-0 text-right text-muted-foreground/70"
                   title={formatExactTimestamp(comment.createdAt)}

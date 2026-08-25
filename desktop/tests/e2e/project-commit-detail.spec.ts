@@ -647,7 +647,7 @@ test("pull request and issue feeds share the commit row structure", async ({
   const issueRows = page.getByTestId("project-issue-row");
   await expect(issueRows.first()).toBeVisible({ timeout: 10_000 });
   await expect(
-    issueRows.first().getByRole("button", { name: /^#/ }),
+    issueRows.first().getByRole("button", { name: /^ISS-/ }),
   ).toBeVisible();
   await waitForAnimations(page);
   await page.screenshot({
