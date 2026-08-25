@@ -214,6 +214,9 @@ pub struct AcpClient {
     standard_usage: StandardUsageTracker,
     /// Known adapter identity for prompt-response usage mapping.
     standard_adapter: Option<StandardAdapterKind>,
+    /// Fallback model ID for turn metrics when the adapter omits the model.
+    /// Adapters that report their model keep their authoritative value.
+    metric_model_fallback: Option<String>,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -563,6 +566,7 @@ impl AcpClient {
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
+            metric_model_fallback: None,
         })
     }
 
@@ -883,11 +887,21 @@ impl AcpClient {
 
     /// Consume per-turn usage for NIP-AM publishing. Goose/buzz-agent is an
     /// exclusive cumulative path; standard ACP prompt usage is used only when
-    /// goose emitted nothing for this turn.
+    /// goose emitted nothing for this turn. If the adapter omits its model,
+    /// the effective session model is used as a fallback.
     pub fn take_turn_usage(&mut self) -> Option<TurnUsage> {
         let goose_usage = self.goose_usage.take();
         let standard_usage = self.standard_usage.take();
-        goose_usage.or(standard_usage)
+        let mut usage = goose_usage.or(standard_usage)?;
+        if usage.model.is_none() {
+            usage.model = self.metric_model_fallback.clone();
+        }
+        Some(usage)
+    }
+
+    /// Set the effective model used only when usage notifications omit it.
+    pub fn set_metric_model_fallback(&mut self, model: Option<String>) {
+        self.metric_model_fallback = model;
     }
 
     /// Notify the usage tracker that buzz-acp just spawned a new session.
@@ -4605,6 +4619,52 @@ mod tests {
             client.take_turn_usage().is_none(),
             "standard usage was drained"
         );
+    }
+
+    // ── Metric model fallback ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn metric_model_fallback_stamps_usage_without_model() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Claude);
+        client.notify_session_spawned("claude-session");
+        client.set_metric_model_fallback(Some("claude-sonnet".to_string()));
+        client.standard_usage.begin_turn("claude-session");
+        client
+            .parse_prompt_response(
+                "claude-session",
+                &prompt_response_usage(10, 2, 12, None, None),
+            )
+            .unwrap();
+        let usage = client.take_turn_usage().expect("claude usage");
+        assert_eq!(usage.model.as_deref(), Some("claude-sonnet"));
+    }
+
+    #[tokio::test]
+    async fn metric_model_fallback_none_leaves_model_unknown() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Claude);
+        client.notify_session_spawned("unknown-session");
+        client.standard_usage.begin_turn("unknown-session");
+        client
+            .parse_prompt_response(
+                "unknown-session",
+                &prompt_response_usage(10, 2, 12, None, None),
+            )
+            .unwrap();
+        assert!(client.take_turn_usage().expect("usage").model.is_none());
+    }
+
+    #[tokio::test]
+    async fn metric_model_fallback_never_overrides_reported_model() {
+        let mut client = spawn_inert_client().await;
+        client.set_metric_model_fallback(Some("wrong-model".to_string()));
+        client.goose_usage.begin_turn("goose-model-session");
+        let mut message = goose_usage_update_msg("goose-model-session", 100, 20, None);
+        message["params"]["update"]["model"] = serde_json::json!("reported-model");
+        client.handle_goose_usage_update(&message);
+        let usage = client.take_turn_usage().expect("goose usage");
+        assert_eq!(usage.model.as_deref(), Some("reported-model"));
     }
 
     // ── Goose usage notification integration ──────────────────────────────
