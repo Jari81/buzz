@@ -50,6 +50,39 @@ type ChannelScreenHeaderProps = {
   onToggleMembers: () => void;
 };
 
+type ChannelHeaderPrimaryActionsProps = {
+  channelActions: React.ReactNode;
+  issuesPanelOpen: boolean;
+  onToggleIssues: () => void;
+  terminalButton: React.ReactNode;
+};
+
+export function ChannelHeaderPrimaryActions({
+  channelActions,
+  issuesPanelOpen,
+  onToggleIssues,
+  terminalButton,
+}: ChannelHeaderPrimaryActionsProps) {
+  return (
+    <div className="flex items-center gap-1">
+      <Button
+        aria-label="Open channel issues"
+        aria-expanded={issuesPanelOpen}
+        data-testid="channel-issues-trigger"
+        onClick={onToggleIssues}
+        size="icon"
+        title="Channel issues"
+        type="button"
+        variant={issuesPanelOpen ? "secondary" : "outline"}
+      >
+        <ListTodo />
+      </Button>
+      {terminalButton}
+      {channelActions}
+    </div>
+  );
+}
+
 export function ChannelScreenHeader({
   activeChannel,
   activeChannelEphemeralDisplay,
@@ -121,22 +154,12 @@ export function ChannelScreenHeader({
     )
   ) : null;
   const actions = activeChannel ? (
-    <div className="flex items-center gap-1">
-      {terminalButton}
-      <Button
-        aria-label="Open channel issues"
-        aria-expanded={issuesPanelOpen}
-        data-testid="channel-issues-trigger"
-        onClick={onToggleIssues}
-        size="icon"
-        title="Channel issues"
-        type="button"
-        variant={issuesPanelOpen ? "secondary" : "outline"}
-      >
-        <ListTodo />
-      </Button>
-      {channelActions}
-    </div>
+    <ChannelHeaderPrimaryActions
+      channelActions={channelActions}
+      issuesPanelOpen={issuesPanelOpen}
+      onToggleIssues={onToggleIssues}
+      terminalButton={terminalButton}
+    />
   ) : null;
 
   if (!showHeaderContent) {

@@ -215,6 +215,25 @@ test("preserves root and comment tags for rich content rendering", () => {
   assert.deepEqual(issue.comments[0].tags, [comment.tags[1]]);
 });
 
+test("renders a review-ready status event ahead of an immutable approved decision label", () => {
+  const root = issueEvent({
+    tags: [
+      ["a", REPO_ADDRESS],
+      ["subject", "Something is broken"],
+      ["t", "approved"],
+    ],
+  });
+  const reviewReady = {
+    ...statusEvent({ kind: 1630, pubkey: OWNER, createdAt: 150 }),
+    content: "## LIVE / Review-ready\n\nKanban KBN-t_example stands on Review.",
+  };
+
+  assert.equal(
+    eventToProjectIssue(root, [reviewReady]).status,
+    PROJECT_ISSUE_STATUS.IN_REVIEW,
+  );
+});
+
 test("recognizes approved status-event labels and action-required comment metadata", () => {
   const root = issueEvent({
     tags: [

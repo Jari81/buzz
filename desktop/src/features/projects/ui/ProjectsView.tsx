@@ -17,6 +17,12 @@ import {
 import { useRepositoryActivitySummariesQuery } from "@/features/projects/repositoryActivityHooks";
 import { useCreateProjectMutation } from "@/features/projects/useCreateProject";
 import { selectProjectRepository } from "@/features/projects/projectModels";
+import {
+  filterIssueRowsByRepository,
+  issueRepositoryScopeOptions,
+  normalizeIssueRepositoryScope,
+  type IssueRepositoryScope,
+} from "@/features/projects/issueRepositoryScope";
 import { useProjectsRepoSnapshotsQuery } from "@/features/projects/useProjectsRepoSnapshots";
 import {
   useMemberChannelIds,
@@ -168,6 +174,8 @@ export function ProjectsView() {
   const [issueScope, setIssueScope] = React.useState<ProjectsWorkItemScope>(
     () => readStoredIssueScope(),
   );
+  const [issueRepositoryScope, setIssueRepositoryScope] =
+    React.useState<IssueRepositoryScope>("all");
   const projectsWorkItemsQuery = useProjectsWorkItemsQuery(
     filter === "all" || filter === "prs" || filter === "issues" ? projects : [],
   );
@@ -282,6 +290,13 @@ export function ProjectsView() {
     (scope: ProjectsWorkItemScope) => {
       setIssueScope(scope);
       writeStoredIssueScope(scope);
+    },
+    [],
+  );
+
+  const handleIssueRepositoryScopeChange = React.useCallback(
+    (scope: IssueRepositoryScope) => {
+      setIssueRepositoryScope(scope);
     },
     [],
   );
@@ -479,16 +494,39 @@ export function ProjectsView() {
               ),
             )
           : issues;
-    return [...scopedIssues].sort((left, right) => {
-      if (sort === "name") {
-        return left.issue.title.localeCompare(right.issue.title);
-      }
-      if (sort === "created") {
-        return right.issue.createdAt - left.issue.createdAt;
-      }
-      return right.issue.updatedAt - left.issue.updatedAt;
-    });
-  }, [currentPubkey, issueScope, projectsWorkItemsQuery.data, sort]);
+    return filterIssueRowsByRepository(scopedIssues, issueRepositoryScope).sort(
+      (left, right) => {
+        if (sort === "name") {
+          return left.issue.title.localeCompare(right.issue.title);
+        }
+        if (sort === "created") {
+          return right.issue.createdAt - left.issue.createdAt;
+        }
+        return right.issue.updatedAt - left.issue.updatedAt;
+      },
+    );
+  }, [
+    currentPubkey,
+    issueRepositoryScope,
+    issueScope,
+    projectsWorkItemsQuery.data,
+    sort,
+  ]);
+
+  const issueRepositoryOptions = React.useMemo(
+    () =>
+      issueRepositoryScopeOptions(
+        projectsWorkItemsQuery.data?.issues.items ?? [],
+      ),
+    [projectsWorkItemsQuery.data?.issues.items],
+  );
+
+  React.useEffect(() => {
+    if (!projectsWorkItemsQuery.data) return;
+    setIssueRepositoryScope((scope) =>
+      normalizeIssueRepositoryScope(scope, issueRepositoryOptions),
+    );
+  }, [issueRepositoryOptions, projectsWorkItemsQuery.data]);
 
   // Route by the canonical `owner:dtag` project ID — a bare dtag is
   // ambiguous across owners (forks can share the same dtag).
@@ -705,7 +743,10 @@ export function ProjectsView() {
     <ProjectsListHeaderBar
       filter={filter}
       variant={viewMode === "list" ? "row" : "bar"}
+      issueRepositoryOptions={issueRepositoryOptions}
+      issueRepositoryScope={issueRepositoryScope}
       issueScope={issueScope}
+      onIssueRepositoryScopeChange={handleIssueRepositoryScopeChange}
       onIssueScopeChange={handleIssueScopeChange}
       onPullRequestScopeChange={handlePullRequestScopeChange}
       onRepositoryScopeChange={handleRepositoryScopeChange}

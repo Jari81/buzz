@@ -83,6 +83,13 @@ function statusFromEvent(issue, statusEvent) {
   // label-based fallbacks below are client-side heuristics, not protocol.
   if (statusEvent?.kind === 1633) return PROJECT_ISSUE_STATUS.TRIAGE;
 
+  // Review-ready is verified workflow evidence on the mutable NIP-34 status
+  // event. It must override the immutable root's historic `approved` decision
+  // label: approval admitted work to the queue, it did not complete review.
+  if (/\breview[- ]ready\b/i.test(statusEvent?.content ?? "")) {
+    return PROJECT_ISSUE_STATUS.IN_REVIEW;
+  }
+
   const labels = [
     ...getAllTags(issue, "t"),
     ...(statusEvent ? getAllTags(statusEvent, "t") : []),
