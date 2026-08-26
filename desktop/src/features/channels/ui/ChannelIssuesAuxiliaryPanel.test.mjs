@@ -33,6 +33,11 @@ test("selected issue header exposes a visible back action", () => {
 
   assert.match(html, /Back to issues/);
   assert.match(html, /aria-label="Back to issues"/);
+  assert.match(
+    html,
+    /class="[^"]*\brelative\b[^"]*\bz-40\b/,
+    "panel header must stay above the shared z-30 channel backdrop",
+  );
 });
 
 test("channel issues action appears before Buzz Terminal", () => {
