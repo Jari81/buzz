@@ -830,6 +830,66 @@ async fn submit_event_authed(
     }
 
     let kind_u32 = buzz_core::kind::event_kind_u32(&event);
+
+    if kind_u32 == buzz_core::kind::KIND_AGENT_OBSERVER_FRAME {
+        if event.pubkey != pubkey {
+            crate::handlers::ingest::reject_with_transport("http", "auth");
+            let response = api_error(
+                StatusCode::FORBIDDEN,
+                "invalid: event pubkey does not match authenticated identity",
+            );
+            return SubmitOutcome::Err {
+                status: response.0,
+                response,
+            };
+        }
+
+        let event_id = event.id.to_hex();
+        return match crate::handlers::event::publish_agent_observer_event(
+            event,
+            tenant,
+            Arc::clone(state),
+            None,
+        )
+        .await
+        {
+            Ok(()) => SubmitOutcome::Ok {
+                accepted: true,
+                kind: kind_u32,
+                response: Json(serde_json::json!({
+                    "event_id": event_id,
+                    "accepted": true,
+                    "message": "",
+                })),
+            },
+            Err(IngestError::Rejected(msg)) => {
+                let reason = truncate_reason(&msg, REJECT_REASON_MAX_BYTES).to_owned();
+                crate::handlers::ingest::reject_with_transport("http", "invalid");
+                SubmitOutcome::Rejected {
+                    kind: kind_u32,
+                    reason,
+                    response: api_error(StatusCode::BAD_REQUEST, &msg),
+                }
+            }
+            Err(IngestError::AuthFailed(msg)) => {
+                crate::handlers::ingest::reject_with_transport("http", "auth");
+                let response = api_error(StatusCode::FORBIDDEN, &msg);
+                SubmitOutcome::Err {
+                    status: response.0,
+                    response,
+                }
+            }
+            Err(IngestError::Internal(msg)) => {
+                crate::handlers::ingest::reject_with_transport("http", "error");
+                let response = internal_error(&msg);
+                SubmitOutcome::Err {
+                    status: response.0,
+                    response,
+                }
+            }
+        };
+    }
+
     let auth = IngestAuth::Http {
         pubkey,
         scopes: buzz_auth::Scope::all_known(), // Pure Nostr: full scopes, channel access via membership
@@ -3445,6 +3505,162 @@ mod tests {
             .await
             .expect("router oneshot")
             .status()
+    }
+
+    #[test]
+    #[ignore = "requires Postgres"]
+    fn submit_event_agent_observer_frame_is_ephemeral_and_accepted() {
+        use buzz_core::observer::{
+            encrypt_observer_payload, OBSERVER_AGENT_TAG, OBSERVER_FRAME_TAG,
+            OBSERVER_FRAME_TELEMETRY,
+        };
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current_thread runtime");
+        let state = rt
+            .block_on(bridge_handler_test_state())
+            .expect("local Postgres not reachable — start Postgres on 127.0.0.1:5432 before running ignored bridge handler tests");
+        let host = format!("bridge-observer-{}.local", uuid::Uuid::new_v4().simple());
+        let community = rt
+            .block_on(state.db.ensure_configured_community(&host))
+            .expect("ensure community")
+            .id;
+
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        rt.block_on(
+            state
+                .db
+                .ensure_user(community, &agent.public_key().to_bytes()),
+        )
+        .expect("ensure agent user");
+        rt.block_on(
+            state
+                .db
+                .ensure_user(community, &owner.public_key().to_bytes()),
+        )
+        .expect("ensure owner user");
+        assert!(rt
+            .block_on(state.db.set_agent_owner(
+                community,
+                &agent.public_key().to_bytes(),
+                &owner.public_key().to_bytes(),
+            ))
+            .expect("set agent owner"));
+
+        let encrypted = encrypt_observer_payload(
+            &agent,
+            &owner.public_key(),
+            &serde_json::json!({"type": "turn_started"}),
+        )
+        .expect("encrypt observer payload");
+        let event = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_AGENT_OBSERVER_FRAME as u16),
+            encrypted,
+        )
+        .tags([
+            Tag::parse(["p", &owner.public_key().to_hex()]).expect("p tag"),
+            Tag::parse([OBSERVER_AGENT_TAG, &agent.public_key().to_hex()]).expect("agent tag"),
+            Tag::parse([OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY]).expect("frame tag"),
+        ])
+        .sign_with_keys(&agent)
+        .expect("sign observer event");
+        let event_json = serde_json::to_vec(&event).expect("serialize observer event");
+
+        let status = rt.block_on(post_events(
+            state.clone(),
+            &host,
+            &agent.public_key().to_hex(),
+            &event_json,
+        ));
+        assert_eq!(
+            status,
+            axum::http::StatusCode::OK,
+            "valid observer frames must be accepted through POST /events"
+        );
+        assert!(
+            rt.block_on(state.db.get_event_by_id(community, event.id.as_bytes()))
+                .expect("query observer event")
+                .is_none(),
+            "kind:24200 is ephemeral and must never be persisted"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires Postgres"]
+    fn submit_event_agent_observer_frame_rejects_mismatched_authenticated_identity() {
+        use buzz_core::observer::{
+            encrypt_observer_payload, OBSERVER_AGENT_TAG, OBSERVER_FRAME_TAG,
+            OBSERVER_FRAME_TELEMETRY,
+        };
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current_thread runtime");
+        let state = rt
+            .block_on(bridge_handler_test_state())
+            .expect("local Postgres not reachable — start Postgres on 127.0.0.1:5432 before running ignored bridge handler tests");
+        let host = format!(
+            "bridge-observer-auth-{}.local",
+            uuid::Uuid::new_v4().simple()
+        );
+        let community = rt
+            .block_on(state.db.ensure_configured_community(&host))
+            .expect("ensure community")
+            .id;
+
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let caller = Keys::generate();
+        for keys in [&agent, &owner, &caller] {
+            rt.block_on(
+                state
+                    .db
+                    .ensure_user(community, &keys.public_key().to_bytes()),
+            )
+            .expect("ensure user");
+        }
+        assert!(rt
+            .block_on(state.db.set_agent_owner(
+                community,
+                &agent.public_key().to_bytes(),
+                &owner.public_key().to_bytes(),
+            ))
+            .expect("set agent owner"));
+
+        let encrypted = encrypt_observer_payload(
+            &agent,
+            &owner.public_key(),
+            &serde_json::json!({"type": "turn_started"}),
+        )
+        .expect("encrypt observer payload");
+        let event = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_AGENT_OBSERVER_FRAME as u16),
+            encrypted,
+        )
+        .tags([
+            Tag::parse(["p", &owner.public_key().to_hex()]).expect("p tag"),
+            Tag::parse([OBSERVER_AGENT_TAG, &agent.public_key().to_hex()]).expect("agent tag"),
+            Tag::parse([OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY]).expect("frame tag"),
+        ])
+        .sign_with_keys(&agent)
+        .expect("sign observer event");
+        let event_json = serde_json::to_vec(&event).expect("serialize observer event");
+
+        let status = rt.block_on(post_events(
+            state,
+            &host,
+            &caller.public_key().to_hex(),
+            &event_json,
+        ));
+        assert_eq!(
+            status,
+            axum::http::StatusCode::FORBIDDEN,
+            "observer event pubkey must match the authenticated HTTP identity"
+        );
     }
 
     /// Collect buzz_events_rejected_total with (transport, reason) labels from

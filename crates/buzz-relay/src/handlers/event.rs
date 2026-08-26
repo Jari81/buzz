@@ -944,11 +944,7 @@ fn observer_frame_rate_limited(
     }
 }
 
-/// Handle encrypted agent observer frames (kind 24200).
-///
-/// These frames bypass storage and are routed as global ephemeral events. The
-/// relay gates publication by the existing `agent_owner_pubkey` mapping and
-/// gates subscription in the REQ handler via the cleartext `p` tag.
+/// Handle encrypted agent observer frames (kind 24200) received over WebSocket.
 async fn handle_agent_observer_event(
     event: Event,
     conn_id: uuid::Uuid,
@@ -956,138 +952,125 @@ async fn handle_agent_observer_event(
     conn: Arc<ConnectionState>,
     state: Arc<AppState>,
 ) {
+    let session_owner = {
+        let auth = conn.auth_state.read().await;
+        if let crate::connection::AuthState::Authenticated(ctx) = &*auth {
+            ctx.agent_owner_pubkey
+        } else {
+            None
+        }
+    };
+
+    match publish_agent_observer_event(event, &conn.tenant, Arc::clone(&state), session_owner).await
+    {
+        Ok(()) => {
+            conn.send(RelayMessage::ok(event_id_hex, true, ""));
+        }
+        Err(IngestError::Rejected(message)) => {
+            reject("invalid");
+            conn.send(RelayMessage::ok(event_id_hex, false, &message));
+        }
+        Err(IngestError::AuthFailed(message)) => {
+            reject("auth");
+            conn.send(RelayMessage::ok(event_id_hex, false, &message));
+        }
+        Err(IngestError::Internal(message)) => {
+            warn!(conn_id = %conn_id, event_id = %event_id_hex, "Agent observer handling failed: {message}");
+            conn.send(RelayMessage::ok(
+                event_id_hex,
+                false,
+                "error: internal server error",
+            ));
+        }
+    }
+}
+
+/// Validate, authorize, and fan out one encrypted agent observer frame.
+///
+/// Shared by WebSocket `EVENT` and HTTP `POST /events`. Observer frames are
+/// global ephemeral traffic: this function never writes them to Postgres.
+pub(crate) async fn publish_agent_observer_event(
+    event: Event,
+    tenant: &TenantContext,
+    state: Arc<AppState>,
+    session_owner: Option<PublicKey>,
+) -> Result<(), IngestError> {
+    let event_id_hex = event.id.to_hex();
     let event_clone = event.clone();
     let verify_result = tokio::task::spawn_blocking(move || verify_event(&event_clone)).await;
     match verify_result {
         Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            conn.send(RelayMessage::ok(
-                event_id_hex,
-                false,
-                &format!("invalid: {e}"),
-            ));
-            return;
-        }
-        Err(_) => {
-            conn.send(RelayMessage::ok(
-                event_id_hex,
-                false,
-                "error: internal error",
-            ));
-            return;
+        Ok(Err(e)) => return Err(IngestError::Rejected(format!("invalid: {e}"))),
+        Err(e) => {
+            return Err(IngestError::Internal(format!(
+                "observer signature verification task failed: {e}"
+            )))
         }
     }
 
-    // Freshness check: reject observer frames with stale/future timestamps
     let now = chrono::Utc::now().timestamp();
     let event_ts = event.created_at.as_secs() as i64;
     if (event_ts - now).unsigned_abs() > 300 {
-        conn.send(RelayMessage::ok(
-            event_id_hex,
-            false,
-            "invalid: observer frame timestamp outside ±5 minute freshness window",
+        return Err(IngestError::Rejected(
+            "invalid: observer frame timestamp outside ±5 minute freshness window".into(),
         ));
-        return;
     }
 
     let route = match agent_observer_route(&event) {
         Ok(Some(route)) => route,
-        Ok(None) => {
-            // Unknown frame value — silently drop, no error to publisher.
-            conn.send(RelayMessage::ok(event_id_hex, true, ""));
-            return;
-        }
-        Err(message) => {
-            reject("invalid");
-            conn.send(RelayMessage::ok(event_id_hex, false, &message));
-            return;
-        }
-    };
-
-    // Fast path: if this connection authenticated via NIP-OA and the verified
-    // owner matches the observer frame's target owner, skip the DB lookup entirely.
-    let session_owner_match = {
-        let auth = conn.auth_state.read().await;
-        if let crate::connection::AuthState::Authenticated(ctx) = &*auth {
-            ctx.agent_owner_pubkey.as_ref() == Some(&route.owner)
-        } else {
-            false
-        }
+        Ok(None) => return Ok(()),
+        Err(message) => return Err(IngestError::Rejected(message)),
     };
 
     let agent_bytes = route.agent.to_bytes().to_vec();
     let owner_bytes = route.owner.to_bytes().to_vec();
-    let cache_key = (
-        conn.tenant.community(),
-        agent_bytes.clone(),
-        owner_bytes.clone(),
-    );
-    let is_owner = if session_owner_match {
+    let cache_key = (tenant.community(), agent_bytes.clone(), owner_bytes.clone());
+    let is_owner = if session_owner.as_ref() == Some(&route.owner) {
         true
     } else {
         match state.observer_owner_cache.get(&cache_key) {
             Some(cached) => cached,
             None => {
-                let result = state
+                let value = state
                     .db
-                    .is_agent_owner(conn.tenant.community(), &agent_bytes, &owner_bytes)
-                    .await;
-                match result {
-                    Ok(v) => {
-                        state.observer_owner_cache.insert(cache_key, v);
-                        v
-                    }
-                    Err(e) => {
-                        warn!(conn_id = %conn_id, event_id = %event_id_hex, "agent observer owner check failed: {e}");
-                        conn.send(RelayMessage::ok(
-                            event_id_hex,
-                            false,
-                            "error: internal server error",
-                        ));
-                        return;
-                    }
-                }
+                    .is_agent_owner(tenant.community(), &agent_bytes, &owner_bytes)
+                    .await
+                    .map_err(|e| {
+                        IngestError::Internal(format!("agent observer owner check failed: {e}"))
+                    })?;
+                state.observer_owner_cache.insert(cache_key, value);
+                value
             }
         }
     };
     if !is_owner {
-        reject("auth");
-        conn.send(RelayMessage::ok(
-            event_id_hex,
-            false,
-            "restricted: observer frame is not authorized for this agent owner",
+        return Err(IngestError::AuthFailed(
+            "restricted: observer frame is not authorized for this agent owner".into(),
         ));
-        return;
     }
 
-    // Rate limit telemetry frames only (100/sec per agent).
-    // Control frames (owner → agent) bypass the limiter — they are rare and must not
-    // be starved by bursty telemetry from the agent.
     if matches!(route.direction, AgentObserverDirection::Telemetry) {
         let agent_key: [u8; 32] = agent_bytes.as_slice().try_into().unwrap_or([0u8; 32]);
-        if observer_frame_rate_limited(&state, conn.tenant.community(), agent_key) {
-            conn.send(RelayMessage::ok(
-                event_id_hex,
-                false,
-                "rate-limited: observer frame rate exceeded (100/sec per agent)",
+        if observer_frame_rate_limited(&state, tenant.community(), agent_key) {
+            return Err(IngestError::Rejected(
+                "rate-limited: observer frame rate exceeded (100/sec per agent)".into(),
             ));
-            return;
         }
     }
 
-    state.mark_local_event(conn.tenant.community(), &event.id);
+    state.mark_local_event(tenant.community(), &event.id);
     if let Err(e) = state
         .pubsub
-        .publish_event(&conn.tenant, EventTopic::Global, &event)
+        .publish_event(tenant, EventTopic::Global, &event)
         .await
     {
         state
             .local_event_ids
-            .invalidate(&(conn.tenant.community(), event.id.to_bytes()));
-        warn!(conn_id = %conn_id, event_id = %event_id_hex, "Agent observer publish failed: {e}");
+            .invalidate(&(tenant.community(), event.id.to_bytes()));
+        warn!(event_id = %event_id_hex, "Agent observer publish failed: {e}");
     }
 
-    let stored_event = StoredEvent::new(event.clone(), None);
+    let stored_event = StoredEvent::new(event, None);
     debug!(
         event_id = %event_id_hex,
         agent = %route.agent.to_hex(),
@@ -1095,9 +1078,9 @@ async fn handle_agent_observer_event(
         direction = ?route.direction,
         "Agent observer fan-out"
     );
-    fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
+    fan_out_event_to_local_subscribers(&state, tenant.community(), &stored_event).await;
 
-    conn.send(RelayMessage::ok(event_id_hex, true, ""));
+    Ok(())
 }
 
 fn agent_observer_route(event: &Event) -> Result<Option<AgentObserverRoute>, String> {
