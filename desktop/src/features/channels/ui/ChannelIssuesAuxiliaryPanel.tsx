@@ -38,7 +38,7 @@ export function ChannelIssuesPanelHeader({
   selectedIssueId: string | null;
 }) {
   return (
-    <header className="flex shrink-0 items-center justify-between border-b border-border/60 px-4 py-3">
+    <header className="relative z-40 flex shrink-0 items-center justify-between border-b border-border/60 px-4 py-3">
       <div className="flex min-w-0 items-center gap-2">
         {selectedIssueId ? (
           <Button
