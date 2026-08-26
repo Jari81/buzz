@@ -1,4 +1,8 @@
 import type {
+  IssueRepositoryScope,
+  IssueRepositoryScopeOption,
+} from "@/features/projects/issueRepositoryScope";
+import type {
   ProjectsFilter,
   ProjectsRepositoryScope,
   ProjectsSort,
@@ -47,7 +51,10 @@ const ISSUE_SCOPE_OPTIONS: Array<{
 
 type ProjectsListHeaderBarProps = {
   filter: ProjectsFilter;
+  issueRepositoryOptions: IssueRepositoryScopeOption[];
+  issueRepositoryScope: IssueRepositoryScope;
   issueScope: ProjectsWorkItemScope;
+  onIssueRepositoryScopeChange: (scope: IssueRepositoryScope) => void;
   onIssueScopeChange: (scope: ProjectsWorkItemScope) => void;
   onPullRequestScopeChange: (scope: ProjectsWorkItemScope) => void;
   onRepositoryScopeChange: (scope: ProjectsRepositoryScope) => void;
@@ -71,7 +78,10 @@ type ProjectsListHeaderBarProps = {
  */
 export function ProjectsListHeaderBar({
   filter,
+  issueRepositoryOptions,
+  issueRepositoryScope,
   issueScope,
+  onIssueRepositoryScopeChange,
   onIssueScopeChange,
   onPullRequestScopeChange,
   onRepositoryScopeChange,
@@ -92,12 +102,20 @@ export function ProjectsListHeaderBar({
         value={pullRequestScope}
       />
     ) : filter === "issues" ? (
-      <ProjectsListScopeDropdown
-        label="Filter issues"
-        onChange={onIssueScopeChange}
-        options={ISSUE_SCOPE_OPTIONS}
-        value={issueScope}
-      />
+      <div className="flex flex-wrap items-center gap-1">
+        <ProjectsListScopeDropdown
+          label="Filter issue repository"
+          onChange={onIssueRepositoryScopeChange}
+          options={issueRepositoryOptions}
+          value={issueRepositoryScope}
+        />
+        <ProjectsListScopeDropdown
+          label="Filter issues"
+          onChange={onIssueScopeChange}
+          options={ISSUE_SCOPE_OPTIONS}
+          value={issueScope}
+        />
+      </div>
     ) : filter === "projects" ? (
       <ProjectsListScopeDropdown
         label="Filter projects"

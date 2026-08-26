@@ -22,7 +22,70 @@ type ChannelIssuesAuxiliaryPanelProps = {
  * Channel-scoped issue surface. The channel binding on a repository is the
  * authority for scope: no binding means no issue list, never a global fallback.
  */
-export function ChannelIssuesAuxiliaryPanel({
+export function channelIssuesPanelInstanceKey(channelId: string) {
+  return `channel-issues-panel:${channelId}`;
+}
+
+export function ChannelIssuesPanelHeader({
+  onBack,
+  onClose,
+  repositoryName,
+  selectedIssueId,
+}: {
+  onBack: () => void;
+  onClose: () => void;
+  repositoryName: string | null;
+  selectedIssueId: string | null;
+}) {
+  return (
+    <header className="flex shrink-0 items-center justify-between border-b border-border/60 px-4 py-3">
+      <div className="flex min-w-0 items-center gap-2">
+        {selectedIssueId ? (
+          <Button
+            aria-label="Back to issues"
+            onClick={onBack}
+            size="sm"
+            title="Back to issues"
+            type="button"
+            variant="ghost"
+          >
+            <ArrowLeft className="h-4 w-4" />
+            <span>Back to issues</span>
+          </Button>
+        ) : null}
+        <div className="min-w-0">
+          <h2 className="text-sm font-semibold">Issues</h2>
+          <p className="truncate text-xs text-muted-foreground">
+            {repositoryName ?? "No repository linked to this channel"}
+          </p>
+        </div>
+      </div>
+      <Button
+        aria-label="Close issues"
+        onClick={onClose}
+        size="icon"
+        title="Close issues"
+        type="button"
+        variant="ghost"
+      >
+        <X className="h-4 w-4" />
+      </Button>
+    </header>
+  );
+}
+
+export function ChannelIssuesAuxiliaryPanel(
+  props: ChannelIssuesAuxiliaryPanelProps,
+) {
+  return (
+    <ChannelIssuesAuxiliaryPanelForChannel
+      key={channelIssuesPanelInstanceKey(props.activeChannel.id)}
+      {...props}
+    />
+  );
+}
+
+function ChannelIssuesAuxiliaryPanelForChannel({
   activeChannel,
   canResetWidth,
   onClose,
@@ -48,38 +111,12 @@ export function ChannelIssuesAuxiliaryPanel({
       widthPx={widthPx}
     >
       <div className="flex min-h-0 flex-1 flex-col">
-        <header className="flex shrink-0 items-center justify-between border-b border-border/60 px-4 py-3">
-          <div className="flex min-w-0 items-center gap-2">
-            {selectedIssueId ? (
-              <Button
-                aria-label="Back to issues"
-                onClick={() => setSelectedIssueId(null)}
-                size="icon"
-                title="Back to issues"
-                type="button"
-                variant="ghost"
-              >
-                <ArrowLeft className="h-4 w-4" />
-              </Button>
-            ) : null}
-            <div className="min-w-0">
-              <h2 className="text-sm font-semibold">Issues</h2>
-              <p className="truncate text-xs text-muted-foreground">
-                {repository?.name ?? "No repository linked to this channel"}
-              </p>
-            </div>
-          </div>
-          <Button
-            aria-label="Close issues"
-            onClick={onClose}
-            size="icon"
-            title="Close issues"
-            type="button"
-            variant="ghost"
-          >
-            <X className="h-4 w-4" />
-          </Button>
-        </header>
+        <ChannelIssuesPanelHeader
+          onBack={() => setSelectedIssueId(null)}
+          onClose={onClose}
+          repositoryName={repository?.name ?? null}
+          selectedIssueId={selectedIssueId}
+        />
         <div className="min-h-0 flex-1 overflow-y-auto">
           {projectsQuery.isLoading ? (
             <p className="p-4 text-sm text-muted-foreground">Loading issues…</p>

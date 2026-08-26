@@ -276,7 +276,6 @@ function IssueStatusSection({
   embedded,
   items,
   label,
-  limit,
   onOpen,
   profiles,
   status,
@@ -286,7 +285,6 @@ function IssueStatusSection({
   embedded: boolean;
   items: ProjectIssueListItem[];
   label: string;
-  limit: number;
   onOpen: ProjectsIssuesListProps["onOpen"];
   profiles?: UserProfileLookup;
   status: string;
@@ -294,12 +292,7 @@ function IssueStatusSection({
   viewMode: ProjectsIssuesListProps["viewMode"];
 }) {
   const [expanded, setExpanded] = React.useState(!terminal);
-  const [showAll, setShowAll] = React.useState(false);
-  const visibleItems = expanded
-    ? showAll
-      ? items
-      : items.slice(0, limit)
-    : [];
+  const visibleItems = expanded ? items : [];
 
   if (items.length === 0) return null;
 
@@ -322,17 +315,6 @@ function IssueStatusSection({
               variant="ghost"
             >
               {expanded ? "Collapse" : "Expand"}
-            </Button>
-          ) : null}
-          {expanded && items.length > limit ? (
-            <Button
-              aria-expanded={showAll}
-              onClick={() => setShowAll((value) => !value)}
-              size="xs"
-              type="button"
-              variant="ghost"
-            >
-              {showAll ? "Show less" : `Show ${items.length - limit} more`}
             </Button>
           ) : null}
         </div>
@@ -388,12 +370,6 @@ export function ProjectsIssuesList({
   profiles,
   viewMode,
 }: ProjectsIssuesListProps) {
-  const [limit, setLimit] = React.useState(() => {
-    const stored = Number(
-      globalThis.localStorage?.getItem("buzz.projects.issueRows"),
-    );
-    return stored === 10 || stored === 20 ? stored : 5;
-  });
   const issuesByStatus = React.useMemo(
     () =>
       new Map(
@@ -404,11 +380,6 @@ export function ProjectsIssuesList({
       ),
     [issues],
   );
-
-  const changeLimit = (value: number) => {
-    setLimit(value);
-    globalThis.localStorage?.setItem("buzz.projects.issueRows", String(value));
-  };
 
   if (isLoading) {
     return (
@@ -456,26 +427,12 @@ export function ProjectsIssuesList({
   return (
     <div className="space-y-5">
       {loadNotice}
-      <div className="flex items-center justify-end gap-2 text-xs text-muted-foreground">
-        <label htmlFor="projects-issue-rows">Rows per status</label>
-        <select
-          className="h-8 rounded-md bg-transparent px-2 text-xs text-foreground outline-hidden hover:bg-muted/50 focus:ring-1 focus:ring-ring"
-          id="projects-issue-rows"
-          onChange={(event) => changeLimit(Number(event.target.value))}
-          value={limit}
-        >
-          <option value={5}>5</option>
-          <option value={10}>10</option>
-          <option value={20}>20</option>
-        </select>
-      </div>
       {ISSUE_STATUS_SECTIONS.map(({ label, status, terminal }) => (
         <IssueStatusSection
           embedded={Boolean(embedded)}
           items={issuesByStatus.get(status) ?? []}
           key={status}
           label={label}
-          limit={limit}
           onOpen={onOpen}
           profiles={profiles}
           status={status}
