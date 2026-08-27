@@ -5,7 +5,10 @@ import { JSDOM } from "jsdom";
 
 import { useChannelPaneHandlers } from "./useChannelPaneHandlers.ts";
 
-function useThreadHarness(initialOpenThreadHeadId) {
+function useThreadHarness(
+  initialOpenThreadHeadId,
+  initialIssuesPanelOpen = false,
+) {
   const [openThreadHeadId, commitOpenThreadHeadId] = React.useState(
     initialOpenThreadHeadId,
   );
@@ -22,6 +25,9 @@ function useThreadHarness(initialOpenThreadHeadId) {
     new Set(),
   );
   const [editTargetId, setEditTargetId] = React.useState(null);
+  const [issuesPanelOpen, setIssuesPanelOpen] = React.useState(
+    initialIssuesPanelOpen,
+  );
 
   const handlers = useChannelPaneHandlers({
     deleteMessageMutation: { mutateAsync: async () => {} },
@@ -31,6 +37,7 @@ function useThreadHarness(initialOpenThreadHeadId) {
     getFirstReplyIdForMessage: () => null,
     getReplyDescendantIdsForMessage: () => [],
     markRevealedRepliesRead: () => {},
+    onBeforeOpenThread: () => setIssuesPanelOpen(false),
     profiles: undefined,
     recordThreadInteraction: () => {},
     onOptimisticOpenThreadHeadIdChange: setOptimisticOpenThreadHeadId,
@@ -48,13 +55,18 @@ function useThreadHarness(initialOpenThreadHeadId) {
 
   return {
     handlers,
+    issuesPanelOpen,
     openThreadHeadId,
     openThreadCommits: openThreadCommitsRef.current,
     optimisticOpenThreadHeadId,
   };
 }
 
-async function withRenderedHarness(initialOpenThreadHeadId, assertion) {
+async function withRenderedHarness(
+  initialOpenThreadHeadId,
+  assertion,
+  initialIssuesPanelOpen = false,
+) {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", {
     url: "http://localhost",
   });
@@ -67,7 +79,9 @@ async function withRenderedHarness(initialOpenThreadHeadId, assertion) {
   const { act, cleanup, renderHook } = await import("@testing-library/react");
 
   try {
-    const hook = renderHook(() => useThreadHarness(initialOpenThreadHeadId));
+    const hook = renderHook(() =>
+      useThreadHarness(initialOpenThreadHeadId, initialIssuesPanelOpen),
+    );
     await assertion({ act, hook });
   } finally {
     cleanup();
@@ -97,6 +111,23 @@ test("clicking a different thread switches the open sidepanel", async () => {
     assert.equal(hook.result.current.openThreadHeadId, "thread-b");
     assert.equal(hook.result.current.optimisticOpenThreadHeadId, "thread-b");
   });
+});
+
+test("opening a thread closes an open issues sidepanel", async () => {
+  await withRenderedHarness(
+    null,
+    async ({ act, hook }) => {
+      await act(async () => {
+        hook.result.current.handlers.handleOpenThread({ id: "thread-a" });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      assert.equal(hook.result.current.issuesPanelOpen, false);
+      assert.equal(hook.result.current.openThreadHeadId, "thread-a");
+      assert.equal(hook.result.current.optimisticOpenThreadHeadId, "thread-a");
+    },
+    true,
+  );
 });
 
 test("rapid thread clicks commit only the latest sidepanel", async () => {

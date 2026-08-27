@@ -145,6 +145,10 @@ export function ChannelScreen({
   } = useThreadPanelWidth(channelContentWidthPx || undefined);
   const [isMembersSidebarOpen, setIsMembersSidebarOpen] = React.useState(false);
   const [issuesPanelOpen, setIssuesPanelOpen] = React.useState(false);
+  const handleCloseIssuesPanel = React.useCallback(
+    () => setIssuesPanelOpen(false),
+    [],
+  );
   const [isAddBotOpen, setIsAddBotOpen] = React.useState(false);
   const [expandedThreadReplyIds, setExpandedThreadReplyIds] = React.useState(
     () => new Set<string>(),
@@ -486,6 +490,7 @@ export function ChannelScreen({
     getFirstReplyIdForMessage,
     getReplyDescendantIdsForMessage,
     markRevealedRepliesRead,
+    onBeforeOpenThread: handleCloseIssuesPanel,
     profiles: messageProfiles,
     recordThreadInteraction,
     openThreadHeadId: effectiveOpenThreadHeadId,
@@ -741,10 +746,6 @@ export function ChannelScreen({
     setOpenThreadHeadId,
     setProfilePanelPubkey,
   ]);
-  const handleCloseIssuesPanel = React.useCallback(
-    () => setIssuesPanelOpen(false),
-    [],
-  );
   const handleToggleMembers = React.useCallback(
     () => setIsMembersSidebarOpen((prev) => !prev),
     [],

@@ -11,18 +11,41 @@ export function copySelectedPersonaIds(personaIds: string[]): string[] {
 export function countMissingPersonaIds(
   personaIds: string[],
   personas: AgentPersona[],
+  preservedUnavailablePersonaIds: ReadonlySet<string> = new Set(),
 ): number {
   const availablePersonaIds = getAvailablePersonaIds(personas);
-  return personaIds.filter((personaId) => !availablePersonaIds.has(personaId))
-    .length;
+  return personaIds.filter(
+    (personaId) =>
+      !availablePersonaIds.has(personaId) &&
+      !preservedUnavailablePersonaIds.has(personaId),
+  ).length;
 }
 
 export function filterAvailablePersonaIds(
   personaIds: string[],
   personas: AgentPersona[],
+  preservedUnavailablePersonaIds: ReadonlySet<string> = new Set(),
 ): string[] {
   const availablePersonaIds = getAvailablePersonaIds(personas);
-  return personaIds.filter((personaId) => availablePersonaIds.has(personaId));
+  return personaIds.filter(
+    (personaId) =>
+      availablePersonaIds.has(personaId) ||
+      preservedUnavailablePersonaIds.has(personaId),
+  );
+}
+
+export function resolveTeamSubmitPersonaIds(
+  personaIds: string[],
+  personas: AgentPersona[],
+  preservedUnavailablePersonaIds: ReadonlySet<string>,
+  isPersonaVisibilityAuthoritative: boolean,
+): string[] | null {
+  if (!isPersonaVisibilityAuthoritative) return null;
+  return filterAvailablePersonaIds(
+    personaIds,
+    personas,
+    preservedUnavailablePersonaIds,
+  );
 }
 
 export function orderPersonasByInitiallySelected(

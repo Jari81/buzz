@@ -25,6 +25,10 @@ import {
   getPersonaLabelsById,
 } from "@/features/agents/lib/catalog";
 import {
+  isPersonaVisibilityAuthoritative,
+  visibleLibraryPersonas,
+} from "@/features/agents/lib/builtinVisibility";
+import {
   type CatalogPersonaShareLevel,
   catalogPersonasFromPublications,
   findLocalPersonaForCatalogEntry,
@@ -161,13 +165,23 @@ export function usePersonaActions() {
       ),
     [identityQuery.data?.pubkey, personas, publications],
   );
-  const libraryPersonas = React.useMemo(
-    () => getLibraryPersonas(personas),
-    [personas],
-  );
   const hiddenBuiltinPersonaIds = React.useMemo(
     () => new Set(hiddenBuiltinPersonasQuery.data ?? []),
     [hiddenBuiltinPersonasQuery.data],
+  );
+  const isVisibilityAuthoritative = isPersonaVisibilityAuthoritative(
+    personasQuery.data,
+    hiddenBuiltinPersonasQuery.data,
+    personasQuery.error,
+    hiddenBuiltinPersonasQuery.error,
+  );
+  const libraryPersonas = React.useMemo(
+    () =>
+      visibleLibraryPersonas(
+        getLibraryPersonas(personas),
+        hiddenBuiltinPersonaIds,
+      ),
+    [hiddenBuiltinPersonaIds, personas],
   );
   const personaLabelsById = React.useMemo(
     () => getPersonaLabelsById(personas),
@@ -622,6 +636,7 @@ export function usePersonaActions() {
     catalogPersonas,
     libraryPersonas,
     hiddenBuiltinPersonaIds,
+    isVisibilityAuthoritative,
     personaLabelsById,
     isPending,
     personaDialogState,

@@ -13,9 +13,14 @@ import { toast } from "sonner";
 
 import {
   useAvailableAcpRuntimes,
+  useHiddenBuiltinPersonasQuery,
   usePersonasQuery,
   useTeamsQuery,
 } from "@/features/agents/hooks";
+import {
+  getSelectableAgentOptions,
+  isPersonaVisibilityAuthoritative,
+} from "@/features/agents/lib/builtinVisibility";
 import {
   useChannelTemplatesQuery,
   useCreateChannelTemplateMutation,
@@ -58,6 +63,32 @@ import {
 } from "@/shared/ui/dropdown-menu";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
+
+export const getChannelTemplateAgentOptions = getSelectableAgentOptions;
+
+export function getChannelTemplateAgentOptionsForQueryState(
+  personas: readonly AgentPersona[] | undefined,
+  teams: readonly AgentTeam[] | undefined,
+  hiddenBuiltinPersonaIds: readonly string[] | undefined,
+  personasError: unknown,
+  hiddenBuiltinPersonasError: unknown,
+) {
+  if (
+    !isPersonaVisibilityAuthoritative(
+      personas,
+      hiddenBuiltinPersonaIds,
+      personasError,
+      hiddenBuiltinPersonasError,
+    )
+  ) {
+    return { personas: [], teams: [] };
+  }
+  return getChannelTemplateAgentOptions(
+    personas ?? [],
+    teams ?? [],
+    new Set(hiddenBuiltinPersonaIds),
+  );
+}
 
 export function ChannelTemplatesSettingsCard() {
   const templatesQuery = useChannelTemplatesQuery();
@@ -303,9 +334,21 @@ export function TemplateFormDialog({
   const createMutation = useCreateChannelTemplateMutation();
   const updateMutation = useUpdateChannelTemplateMutation();
   const personasQuery = usePersonasQuery();
+  const hiddenBuiltinPersonasQuery = useHiddenBuiltinPersonasQuery();
   const teamsQuery = useTeamsQuery();
   const providersQuery = useAvailableAcpRuntimes();
   const runtimes = providersQuery.data ?? [];
+  const agentOptions = getChannelTemplateAgentOptionsForQueryState(
+    personasQuery.data,
+    teamsQuery.data,
+    hiddenBuiltinPersonasQuery.data,
+    personasQuery.error,
+    hiddenBuiltinPersonasQuery.error,
+  );
+  const agentOptionsLoading =
+    personasQuery.isLoading ||
+    hiddenBuiltinPersonasQuery.isLoading ||
+    teamsQuery.isLoading;
 
   const [name, setName] = React.useState("");
   const [description, setDescription] = React.useState("");
@@ -553,10 +596,10 @@ export function TemplateFormDialog({
           <AddChannelBotPersonasSection
             canToggleSelections={!isPending}
             includeGeneric={false}
-            isLoading={personasQuery.isLoading}
+            isLoading={agentOptionsLoading}
             onToggleGeneric={() => {}}
             onTogglePersona={handleTogglePersona}
-            personas={personasQuery.data ?? []}
+            personas={agentOptions.personas}
             selectedPersonaIds={selectedPersonaIds}
             showGeneric={false}
           />
@@ -566,21 +609,21 @@ export function TemplateFormDialog({
             isPending={isPending}
             onToggleTeam={handleToggleTeam}
             selectedTeamIds={selectedTeamIds}
-            teams={teamsQuery.data ?? []}
-            isLoading={teamsQuery.isLoading}
+            teams={agentOptions.teams}
+            isLoading={agentOptionsLoading}
           />
 
           {/* Runtime assignments */}
           <RuntimeAssignments
             isPending={isPending}
-            personas={personasQuery.data ?? []}
+            personas={agentOptions.personas}
             personaRuntimes={personaRuntimes}
             providers={runtimes}
             providersLoading={providersQuery.isLoading}
             selectedPersonaIds={selectedPersonaIds}
             selectedTeamIds={selectedTeamIds}
             teamRuntimes={teamRuntimes}
-            teams={teamsQuery.data ?? []}
+            teams={agentOptions.teams}
             onPersonaRuntimeChange={(personaId, runtimeId) =>
               setPersonaRuntimes((prev) => ({
                 ...prev,

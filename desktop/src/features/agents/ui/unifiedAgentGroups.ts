@@ -5,11 +5,15 @@ type PersonaGroup = { persona: AgentPersona; agents: ManagedAgent[] };
 export function buildUnifiedGroups(
   personas: AgentPersona[],
   agents: ManagedAgent[],
+  hiddenPersonaIds: ReadonlySet<string> = new Set(),
 ) {
   const byPersonaId = new Map<string, ManagedAgent[]>();
   const ungrouped: ManagedAgent[] = [];
 
   for (const agent of agents) {
+    if (agent.personaId && hiddenPersonaIds.has(agent.personaId)) {
+      continue;
+    }
     if (!agent.personaId) {
       ungrouped.push(agent);
     } else {

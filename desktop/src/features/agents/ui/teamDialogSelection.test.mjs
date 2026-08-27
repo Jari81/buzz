@@ -8,6 +8,8 @@ import {
   orderPersonasByInitiallySelected,
 } from "./teamDialogSelection.ts";
 
+const selectionModule = await import("./teamDialogSelection.ts");
+
 function createPersona(id) {
   return {
     id,
@@ -56,6 +58,17 @@ test("countMissingPersonaIds reports unresolved team personas", () => {
   );
 });
 
+test("countMissingPersonaIds excludes preserved hidden personas", () => {
+  assert.equal(
+    countMissingPersonaIds(
+      ["persona:available", "builtin:hidden", "persona:missing"],
+      [createPersona("persona:available")],
+      new Set(["builtin:hidden"]),
+    ),
+    1,
+  );
+});
+
 test("filterAvailablePersonaIds drops missing personas at submit time", () => {
   assert.deepEqual(
     filterAvailablePersonaIds(
@@ -63,6 +76,47 @@ test("filterAvailablePersonaIds drops missing personas at submit time", () => {
       [createPersona("persona:available")],
     ),
     ["persona:available"],
+  );
+});
+
+test("filterAvailablePersonaIds preserves hidden initial personas", () => {
+  assert.deepEqual(
+    filterAvailablePersonaIds(
+      ["builtin:hidden", "persona:missing", "persona:available"],
+      [createPersona("persona:available")],
+      new Set(["builtin:hidden"]),
+    ),
+    ["builtin:hidden", "persona:available"],
+  );
+});
+
+test("team submit ids fail closed until persona visibility is authoritative", () => {
+  assert.equal(typeof selectionModule.resolveTeamSubmitPersonaIds, "function");
+
+  const selectedIds = [
+    "builtin:hidden",
+    "persona:missing",
+    "persona:available",
+  ];
+  const personas = [createPersona("persona:available")];
+  const preservedIds = new Set(["builtin:hidden"]);
+  assert.equal(
+    selectionModule.resolveTeamSubmitPersonaIds(
+      selectedIds,
+      personas,
+      preservedIds,
+      false,
+    ),
+    null,
+  );
+  assert.deepEqual(
+    selectionModule.resolveTeamSubmitPersonaIds(
+      selectedIds,
+      personas,
+      preservedIds,
+      true,
+    ),
+    ["builtin:hidden", "persona:available"],
   );
 });
 

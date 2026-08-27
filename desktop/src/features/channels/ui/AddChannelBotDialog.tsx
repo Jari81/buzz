@@ -3,17 +3,20 @@ import * as React from "react";
 
 import {
   useCreateChannelManagedAgentsMutation,
+  useHiddenBuiltinPersonasQuery,
   usePersonasQuery,
   useTeamsQuery,
   type CreateChannelManagedAgentResult,
 } from "@/features/agents/hooks";
-import { getActivePersonas } from "@/features/agents/lib/catalog";
+import {
+  getSelectableAgentOptions,
+  isPersonaVisibilityAuthoritative,
+} from "@/features/agents/lib/builtinVisibility";
 import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
-import { getUsableTeams } from "@/features/agents/lib/teamPersonas";
 import { AddChannelBotPersonasSection } from "@/features/channels/ui/AddChannelBotPersonasSection";
 import { AddChannelBotTeamsSection } from "@/features/channels/ui/AddChannelBotTeamsSection";
 import { useInChannelPersonaIds } from "@/features/channels/ui/useInChannelPersonaIds";
-import type { AcpRuntime } from "@/shared/api/types";
+import type { AcpRuntime, AgentPersona, AgentTeam } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
 import { Dialog } from "@/shared/ui/dialog";
@@ -28,6 +31,32 @@ type AddChannelBotDialogProps = {
   onCreateAgent: () => void;
   onOpenChange: (open: boolean) => void;
 };
+
+export const getAddChannelBotOptions = getSelectableAgentOptions;
+
+export function getAddChannelBotOptionsForQueryState(
+  personas: readonly AgentPersona[] | undefined,
+  teams: readonly AgentTeam[] | undefined,
+  hiddenBuiltinPersonaIds: readonly string[] | undefined,
+  personasError: unknown,
+  hiddenBuiltinPersonasError: unknown,
+) {
+  if (
+    !isPersonaVisibilityAuthoritative(
+      personas,
+      hiddenBuiltinPersonaIds,
+      personasError,
+      hiddenBuiltinPersonasError,
+    )
+  ) {
+    return { personas: [], teams: [] };
+  }
+  return getAddChannelBotOptions(
+    personas ?? [],
+    teams ?? [],
+    new Set(hiddenBuiltinPersonaIds),
+  );
+}
 
 function toggleValue(values: readonly string[], value: string) {
   return values.includes(value)
@@ -63,19 +92,29 @@ export function AddChannelBotDialog({
   onOpenChange,
 }: AddChannelBotDialogProps) {
   const personasQuery = usePersonasQuery();
+  const hiddenBuiltinPersonasQuery = useHiddenBuiltinPersonasQuery();
   const teamsQuery = useTeamsQuery();
   const inChannelPersonaIds = useInChannelPersonaIds(
     channelId,
     open && channelId !== null,
   );
   const createBotsMutation = useCreateChannelManagedAgentsMutation(channelId);
-  const personas = React.useMemo(
-    () => getActivePersonas(personasQuery.data ?? []),
-    [personasQuery.data],
-  );
-  const teams = React.useMemo(
-    () => getUsableTeams(teamsQuery.data ?? [], personas),
-    [personas, teamsQuery.data],
+  const { personas, teams } = React.useMemo(
+    () =>
+      getAddChannelBotOptionsForQueryState(
+        personasQuery.data,
+        teamsQuery.data,
+        hiddenBuiltinPersonasQuery.data,
+        personasQuery.error,
+        hiddenBuiltinPersonasQuery.error,
+      ),
+    [
+      hiddenBuiltinPersonasQuery.data,
+      hiddenBuiltinPersonasQuery.error,
+      personasQuery.data,
+      personasQuery.error,
+      teamsQuery.data,
+    ],
   );
   const [selectedPersonaIds, setSelectedPersonaIds] = React.useState<string[]>(
     [],
@@ -238,7 +277,9 @@ export function AddChannelBotDialog({
         <AddChannelBotPersonasSection
           canToggleSelections={!createBotsMutation.isPending}
           inChannelPersonaIds={inChannelPersonaIds}
-          isLoading={personasQuery.isLoading}
+          isLoading={
+            personasQuery.isLoading || hiddenBuiltinPersonasQuery.isLoading
+          }
           onCreateAgent={handleCreateAgent}
           onTogglePersona={(personaId) => {
             setSelectedPersonaIds((current) => toggleValue(current, personaId));

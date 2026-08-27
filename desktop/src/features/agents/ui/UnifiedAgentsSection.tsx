@@ -46,7 +46,7 @@ type UnifiedAgentsSectionProps = {
   personaFeedbackNoticeMessage: string | null;
   isPersonasLoading: boolean;
   isPersonasPending: boolean;
-  hiddenBuiltinCount: number;
+  hiddenBuiltinPersonaIds: ReadonlySet<string>;
   onOpenCatalog: () => void;
   onDuplicatePersona: (persona: AgentPersona) => void;
   onEditPersona: (persona: AgentPersona) => void;
@@ -88,7 +88,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     personaFeedbackNoticeMessage,
     isPersonasLoading,
     isPersonasPending,
-    hiddenBuiltinCount,
+    hiddenBuiltinPersonaIds,
     onOpenCatalog,
     onDuplicatePersona,
     onEditPersona,
@@ -99,8 +99,8 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
   } = props;
 
   const { groups, ungrouped, unknown } = React.useMemo(
-    () => buildUnifiedGroups(personas, agents),
-    [personas, agents],
+    () => buildUnifiedGroups(personas, agents, hiddenBuiltinPersonaIds),
+    [personas, agents, hiddenBuiltinPersonaIds],
   );
   const [collapsed, setCollapsed] = React.useState<Set<string>>(new Set());
   function toggle(key: string) {
@@ -123,7 +123,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     >
       {isLoading ? <LoadingSkeleton /> : null}
 
-      {!isLoading && hiddenBuiltinCount > 0 ? (
+      {!isLoading && hiddenBuiltinPersonaIds.size > 0 ? (
         <div className="flex justify-end">
           <button
             className="text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"

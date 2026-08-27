@@ -6,15 +6,26 @@ import {
 } from "@/features/agents/channelAgents";
 import {
   useAvailableAcpRuntimes,
+  useHiddenBuiltinPersonasQuery,
   usePersonasQuery,
   useTeamsQuery,
 } from "@/features/agents/hooks";
+import {
+  getSelectableAgentOptions,
+  isPersonaVisibilityAuthoritative,
+} from "@/features/agents/lib/builtinVisibility";
 import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
 import { resolveTeamPersonas } from "@/features/agents/lib/teamPersonas";
 import { useLastRuntime } from "@/features/agents/lib/useLastRuntime";
 import { useChannelTemplatesQuery } from "@/features/channel-templates/hooks";
 import { setCanvas } from "@/shared/api/tauri";
-import type { ChannelTemplate } from "@/shared/api/types";
+import type {
+  AgentPersona,
+  AgentTeam,
+  ChannelTemplate,
+  TemplateAgentEntry,
+  TemplateTeamEntry,
+} from "@/shared/api/types";
 
 /**
  * TemplateBackend omits `config` — supply an empty object for provider backends.
@@ -26,11 +37,57 @@ function toManagedBackend(
   return { type: "provider", id: backend.id, config: {} };
 }
 
+export function resolveTemplateAgentEntries(
+  templateAgents: ChannelTemplate["agents"],
+  personas: readonly AgentPersona[],
+  teams: readonly AgentTeam[],
+  hiddenBuiltinPersonaIds: ReadonlySet<string>,
+): Array<{
+  persona: AgentPersona;
+  source: TemplateAgentEntry | TemplateTeamEntry;
+}> {
+  const selectable = getSelectableAgentOptions(
+    personas,
+    teams,
+    hiddenBuiltinPersonaIds,
+  );
+  const personasById = new Map(
+    selectable.personas.map((persona) => [persona.id, persona]),
+  );
+  const teamsById = new Map(selectable.teams.map((team) => [team.id, team]));
+  const seenPersonaIds = new Set<string>();
+  const result: Array<{
+    persona: AgentPersona;
+    source: TemplateAgentEntry | TemplateTeamEntry;
+  }> = [];
+
+  for (const source of templateAgents.personas) {
+    const persona = personasById.get(source.personaId);
+    if (!persona || seenPersonaIds.has(persona.id)) continue;
+    seenPersonaIds.add(persona.id);
+    result.push({ persona, source });
+  }
+
+  for (const source of templateAgents.teams) {
+    const team = teamsById.get(source.teamId);
+    if (!team) continue;
+    const { resolvedPersonas } = resolveTeamPersonas(team, selectable.personas);
+    for (const persona of resolvedPersonas) {
+      if (seenPersonaIds.has(persona.id)) continue;
+      seenPersonaIds.add(persona.id);
+      result.push({ persona, source });
+    }
+  }
+
+  return result;
+}
+
 export function useApplyTemplate() {
   const queryClient = useQueryClient();
   const channelTemplatesQuery = useChannelTemplatesQuery();
   const acpRuntimesQuery = useAvailableAcpRuntimes();
   const personasQuery = usePersonasQuery();
+  const hiddenBuiltinPersonasQuery = useHiddenBuiltinPersonasQuery();
   const teamsQuery = useTeamsQuery();
   const { lastRuntimeId } = useLastRuntime();
 
@@ -63,11 +120,24 @@ export function useApplyTemplate() {
       (t) => t.id === templateId,
     );
     if (!template) return;
+    if (
+      !isPersonaVisibilityAuthoritative(
+        personasQuery.data,
+        hiddenBuiltinPersonasQuery.data,
+        personasQuery.error,
+        hiddenBuiltinPersonasQuery.error,
+      )
+    ) {
+      return;
+    }
     const { personas: templatePersonas, teams: templateTeams } =
       template.agents;
     if (templatePersonas.length === 0 && templateTeams.length === 0) return;
 
-    const allPersonas = personasQuery.data ?? [];
+    const allPersonas = personasQuery.data;
+    const hiddenBuiltinPersonaIds = hiddenBuiltinPersonasQuery.data;
+    if (allPersonas === undefined || hiddenBuiltinPersonaIds === undefined)
+      return;
     const allTeams = teamsQuery.data ?? [];
     const runtimes = acpRuntimesQuery.data ?? [];
     if (runtimes.length === 0) return; // No runtimes — skip silently
@@ -77,17 +147,16 @@ export function useApplyTemplate() {
       runtimes.find((p) => p.id === lastRuntimeId) ?? runtimes[0] ?? null;
     if (!defaultProvider) return;
 
-    const seenPersonaIds = new Set<string>();
     const inputs: CreateChannelManagedAgentInput[] = [];
 
-    // Direct personas from template
-    for (const entry of templatePersonas) {
-      const persona = allPersonas.find((p) => p.id === entry.personaId);
-      if (!persona) continue;
-      if (seenPersonaIds.has(persona.id)) continue;
-      seenPersonaIds.add(persona.id);
+    for (const { persona, source } of resolveTemplateAgentEntries(
+      template.agents,
+      allPersonas,
+      allTeams,
+      new Set(hiddenBuiltinPersonaIds),
+    )) {
       const resolved = resolvePersonaRuntime(
-        entry.runtime ?? persona.runtime,
+        source.runtime ?? persona.runtime,
         runtimes,
         defaultProvider,
       );
@@ -97,36 +166,10 @@ export function useApplyTemplate() {
         personaId: persona.id,
         systemPrompt: persona.systemPrompt,
         avatarUrl: persona.avatarUrl ?? undefined,
-        model: entry.model ?? persona.model ?? undefined,
+        model: source.model ?? persona.model ?? undefined,
         role: "bot",
-        backend: toManagedBackend(entry.backend),
+        backend: toManagedBackend(source.backend),
       });
-    }
-
-    // Team-expanded personas (skip dupes)
-    for (const teamEntry of templateTeams) {
-      const team = allTeams.find((t) => t.id === teamEntry.teamId);
-      if (!team) continue;
-      const { resolvedPersonas } = resolveTeamPersonas(team, allPersonas);
-      for (const persona of resolvedPersonas) {
-        if (seenPersonaIds.has(persona.id)) continue;
-        seenPersonaIds.add(persona.id);
-        const resolved = resolvePersonaRuntime(
-          teamEntry.runtime ?? persona.runtime,
-          runtimes,
-          defaultProvider,
-        );
-        inputs.push({
-          runtime: resolved.runtime ?? defaultProvider,
-          name: persona.displayName,
-          personaId: persona.id,
-          systemPrompt: persona.systemPrompt,
-          avatarUrl: persona.avatarUrl ?? undefined,
-          model: teamEntry.model ?? persona.model ?? undefined,
-          role: "bot",
-          backend: toManagedBackend(teamEntry.backend),
-        });
-      }
     }
 
     if (inputs.length === 0) return;

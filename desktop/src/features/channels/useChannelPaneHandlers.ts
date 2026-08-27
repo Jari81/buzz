@@ -28,6 +28,7 @@ export function useChannelPaneHandlers({
   getFirstReplyIdForMessage,
   getReplyDescendantIdsForMessage,
   markRevealedRepliesRead,
+  onBeforeOpenThread,
   profiles,
   recordThreadInteraction,
   onOptimisticOpenThreadHeadIdChange,
@@ -49,6 +50,7 @@ export function useChannelPaneHandlers({
   getFirstReplyIdForMessage: (messageId: string) => string | null;
   getReplyDescendantIdsForMessage: (messageId: string) => string[];
   markRevealedRepliesRead: (messageId: string) => void;
+  onBeforeOpenThread: () => void;
   profiles: UserProfileLookup | undefined;
   recordThreadInteraction: (rootId: string) => void;
   onOptimisticOpenThreadHeadIdChange: React.Dispatch<
@@ -212,6 +214,7 @@ export function useChannelPaneHandlers({
 
   const handleOpenThread = React.useCallback(
     (message: { id: string }) => {
+      onBeforeOpenThread();
       deferPanelState(() => {
         onOptimisticOpenThreadHeadIdChange(message.id);
         if (openThreadHeadIdRef.current === message.id) {
@@ -226,6 +229,7 @@ export function useChannelPaneHandlers({
     },
     [
       deferPanelState,
+      onBeforeOpenThread,
       onOptimisticOpenThreadHeadIdChange,
       setEditTargetId,
       setExpandedThreadReplyIds,

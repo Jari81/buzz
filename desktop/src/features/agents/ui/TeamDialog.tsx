@@ -23,8 +23,8 @@ import { RemoveMembersConfirmDialog } from "./RemoveMembersConfirmDialog";
 import {
   copySelectedPersonaIds,
   countMissingPersonaIds,
-  filterAvailablePersonaIds,
   orderPersonasByInitiallySelected,
+  resolveTeamSubmitPersonaIds,
 } from "./teamDialogSelection";
 
 type TeamDialogProps = {
@@ -34,6 +34,8 @@ type TeamDialogProps = {
   submitLabel: string;
   initialValues: CreateTeamInput | UpdateTeamInput | null;
   personas: AgentPersona[];
+  preservedUnavailablePersonaIds: ReadonlySet<string>;
+  isPersonaCatalogAuthoritative: boolean;
   error: Error | null;
   isPending: boolean;
   onOpenChange: (open: boolean) => void;
@@ -48,6 +50,8 @@ export function TeamDialog({
   submitLabel,
   initialValues,
   personas,
+  preservedUnavailablePersonaIds,
+  isPersonaCatalogAuthoritative,
   error,
   isPending,
   onOpenChange,
@@ -71,8 +75,12 @@ export function TeamDialog({
       return 0;
     }
 
-    return countMissingPersonaIds(initialValues.personaIds, personas);
-  }, [initialValues, personas]);
+    return countMissingPersonaIds(
+      initialValues.personaIds,
+      personas,
+      preservedUnavailablePersonaIds,
+    );
+  }, [initialValues, personas, preservedUnavailablePersonaIds]);
 
   React.useEffect(() => {
     if (!open || !initialValues) {
@@ -125,12 +133,19 @@ export function TeamDialog({
     [removedPersonaIds, personas],
   );
 
-  function buildSubmitInput(): CreateTeamInput | UpdateTeamInput {
+  function buildSubmitInput(): CreateTeamInput | UpdateTeamInput | null {
+    const personaIds = resolveTeamSubmitPersonaIds(
+      selectedPersonaIds,
+      personas,
+      preservedUnavailablePersonaIds,
+      isPersonaCatalogAuthoritative,
+    );
+    if (personaIds === null) return null;
     const baseInput = {
       name,
       description: teamDescription.trim() || undefined,
       instructions: instructions.trim() || undefined,
-      personaIds: filterAvailablePersonaIds(selectedPersonaIds, personas),
+      personaIds,
     };
 
     if (initialValues && "id" in initialValues) {
@@ -141,23 +156,29 @@ export function TeamDialog({
 
   async function handleSubmit() {
     if (!initialValues) return;
+    const input = buildSubmitInput();
+    if (input === null) return;
 
     if (removedPersonaIds.length > 0 && isEditMode && onDeleteRemovedPersonas) {
       setConfirmRemovalOpen(true);
       return;
     }
 
-    await onSubmit(buildSubmitInput());
+    await onSubmit(input);
   }
 
   async function handleSubmitKeepAgents() {
+    const input = buildSubmitInput();
+    if (input === null) return;
     setConfirmRemovalOpen(false);
-    await onSubmit(buildSubmitInput());
+    await onSubmit(input);
   }
 
   async function handleSubmitDeleteAgents() {
+    const input = buildSubmitInput();
+    if (input === null) return;
     setConfirmRemovalOpen(false);
-    await onSubmit(buildSubmitInput());
+    await onSubmit(input);
     if (onDeleteRemovedPersonas && removedPersonaIds.length > 0) {
       await onDeleteRemovedPersonas(removedPersonaIds);
     }
@@ -328,7 +349,8 @@ export function TeamDialog({
                   disabled={
                     name.trim().length === 0 ||
                     selectedPersonaIds.length === 0 ||
-                    isPending
+                    isPending ||
+                    !isPersonaCatalogAuthoritative
                   }
                   onClick={() => void handleSubmit()}
                   size="sm"

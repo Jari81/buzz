@@ -27,7 +27,6 @@ import { useTeamActions } from "./useTeamActions";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { useBakedBuildEnvQuery } from "@/features/agents/hooks";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
-import { visibleLibraryPersonas } from "@/features/agents/lib/builtinVisibility";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { Button } from "@/shared/ui/button";
 import {
@@ -92,19 +91,6 @@ export function AgentsView() {
   const runningAgentCount = agents.managedAgents.filter((agent) =>
     isManagedAgentActive(agent),
   ).length;
-  const visiblePersonas = React.useMemo(
-    () =>
-      visibleLibraryPersonas(
-        personas.libraryPersonas,
-        agents.managedAgents,
-        personas.hiddenBuiltinPersonaIds,
-      ),
-    [
-      agents.managedAgents,
-      personas.hiddenBuiltinPersonaIds,
-      personas.libraryPersonas,
-    ],
-  );
   const hasSavedAgentDefaults = Boolean(
     globalConfig.preferred_runtime?.trim() ||
       globalConfig.provider?.trim() ||
@@ -254,7 +240,7 @@ export function AgentsView() {
                 void agents.handleStartPersona(persona);
               }}
               // Persona props
-              personas={visiblePersonas}
+              personas={personas.libraryPersonas}
               personasError={
                 personas.personasQuery.error instanceof Error
                   ? personas.personasQuery.error
@@ -277,7 +263,7 @@ export function AgentsView() {
                 personas.hiddenBuiltinPersonasQuery.isLoading
               }
               isPersonasPending={personas.isPending}
-              hiddenBuiltinCount={personas.hiddenBuiltinPersonaIds.size}
+              hiddenBuiltinPersonaIds={personas.hiddenBuiltinPersonaIds}
               onOpenCatalog={openUnifiedCatalog}
               onDuplicatePersona={personas.openDuplicate}
               onEditPersona={personas.openEdit}
@@ -574,6 +560,8 @@ export function AgentsView() {
           onSubmit={teamActions.handleTeamSubmit}
           open={teamActions.teamDialogState !== null}
           personas={personas.libraryPersonas}
+          preservedUnavailablePersonaIds={personas.hiddenBuiltinPersonaIds}
+          isPersonaCatalogAuthoritative={personas.isVisibilityAuthoritative}
           submitLabel={teamActions.teamDialogState.submitLabel}
           title={teamActions.teamDialogState.title}
         />
