@@ -2249,6 +2249,147 @@ pub fn resolve_model_switch_method(
     None
 }
 
+/// One entry of the flattened, dialect-agnostic model catalog sent to the
+/// desktop in a `list_models` control result.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CatalogModel {
+    /// Value to send back in a `switch_model` frame.
+    pub id: String,
+    /// Human label; falls back to `id` when the agent supplies none.
+    pub name: String,
+}
+
+/// Flatten the two catalog dialects into one list plus the agent's current model.
+///
+/// Precedence mirrors [`resolve_model_switch_method`]: stable `configOptions`
+/// (category `model`) first, unstable `availableModels` second. Only the first
+/// non-empty source contributes, so an agent advertising both never yields a
+/// list with duplicate ids — and the ids the desktop offers are exactly the ids
+/// the switch path can resolve.
+pub fn flatten_model_catalog(
+    config_options: &[serde_json::Value],
+    available_models: Option<&serde_json::Value>,
+) -> (Vec<CatalogModel>, Option<String>) {
+    let mut models = Vec::new();
+    let mut current = None;
+
+    for config_opt in config_options {
+        if current.is_none() {
+            current = config_opt
+                .get("currentValue")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+        }
+        let Some(options) = config_opt.get("options").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for opt in options {
+            let Some(id) = opt.get("value").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let name = opt
+                .get("name")
+                .and_then(|v| v.as_str())
+                .filter(|n| !n.trim().is_empty())
+                .unwrap_or(id);
+            models.push(CatalogModel {
+                id: id.to_owned(),
+                name: name.to_owned(),
+            });
+        }
+    }
+
+    if !models.is_empty() {
+        return (models, current);
+    }
+
+    // Fall back to the unstable dialect only when configOptions carried nothing.
+    let Some(state) = available_models else {
+        return (models, current);
+    };
+    let current = state
+        .get("currentModelId")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .or(current);
+    if let Some(available) = state.get("availableModels").and_then(|v| v.as_array()) {
+        for model in available {
+            let Some(id) = model.get("modelId").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let name = model
+                .get("name")
+                .and_then(|v| v.as_str())
+                .filter(|n| !n.trim().is_empty())
+                .unwrap_or(id);
+            models.push(CatalogModel {
+                id: id.to_owned(),
+                name: name.to_owned(),
+            });
+        }
+    }
+    (models, current)
+}
+
+/// Keep only models whose provider segment (everything before the first `/`)
+/// appears in `providers`. An empty `providers` list means "no filter" — the
+/// caller asked for everything.
+///
+/// Ids without a `/` are matched whole, so a flat-namespace agent is filterable
+/// by its bare model ids rather than silently yielding nothing.
+pub fn filter_models_by_provider(
+    models: Vec<CatalogModel>,
+    providers: &[String],
+) -> Vec<CatalogModel> {
+    if providers.is_empty() {
+        return models;
+    }
+    models
+        .into_iter()
+        .filter(|model| {
+            let provider = model
+                .id
+                .split_once('/')
+                .map_or(model.id.as_str(), |(p, _)| p);
+            providers.iter().any(|allowed| allowed == provider)
+        })
+        .collect()
+}
+
+/// Truncate a catalog so its serialized form stays within `budget_bytes`.
+///
+/// This exists because the generic oversize path cannot help here:
+/// `fit_observer_event_to_budget` elides *long string leaves*, and model ids are
+/// 20–50 bytes — far below its retain floor. A catalog that overflows would
+/// therefore not be trimmed but replaced wholesale by the "payload too large"
+/// stub, i.e. a silent total loss. Capping the list here keeps the frame
+/// deliverable and tells the desktop it is looking at a partial list.
+///
+/// Returns the kept prefix and whether anything was dropped.
+pub fn truncate_models_to_budget(
+    models: Vec<CatalogModel>,
+    budget_bytes: usize,
+) -> (Vec<CatalogModel>, bool) {
+    let mut used = 2; // the enclosing `[]`
+    let total = models.len();
+    let mut kept: Vec<CatalogModel> = Vec::with_capacity(total);
+    for model in models {
+        let entry_len = match serde_json::to_string(&model) {
+            Ok(json) => json.len() + 1, // + separating comma
+            // An entry we cannot serialize would also fail in the frame; skip it
+            // rather than letting it silently inflate the estimate.
+            Err(_) => continue,
+        };
+        if used + entry_len > budget_bytes {
+            return (kept, true);
+        }
+        used += entry_len;
+        kept.push(model);
+    }
+    let truncated = kept.len() < total;
+    (kept, truncated)
+}
+
 /// Whether `desired_model` appears in pre-extracted catalog halves.
 ///
 /// Mirrors [`resolve_model_switch_method`]'s match, but operates on the
@@ -2763,6 +2904,150 @@ mod tests {
     fn extract_model_state_none_when_absent() {
         let result = serde_json::json!({ "sessionId": "sess-1" });
         assert!(super::extract_model_state(&result).is_none());
+    }
+
+    /// Shape observed from `kilo acp --pure` 7.4.11: `id` rather than the
+    /// spec's `configId`, `currentValue` for the active model, and `{value,
+    /// name}` options.
+    fn kilo_model_config_option() -> serde_json::Value {
+        serde_json::json!({
+            "id": "model",
+            "category": "model",
+            "currentValue": "openai/gpt-5.6-terra",
+            "options": [
+                { "value": "openai/gpt-5.6-terra", "name": "OpenAI/GPT-5.6 Terra" },
+                { "value": "alibaba-token-plan/qwen3.8-max", "name": "Alibaba Token Plan/Qwen3.8 Max" },
+                { "value": "openrouter/deepseek/deepseek-v3.2", "name": "OpenRouter/DeepSeek V3.2" }
+            ]
+        })
+    }
+
+    #[test]
+    fn flatten_reads_stable_config_options() {
+        let (models, current) = super::flatten_model_catalog(&[kilo_model_config_option()], None);
+        assert_eq!(current.as_deref(), Some("openai/gpt-5.6-terra"));
+        assert_eq!(models.len(), 3);
+        assert_eq!(models[0].id, "openai/gpt-5.6-terra");
+        assert_eq!(models[0].name, "OpenAI/GPT-5.6 Terra");
+    }
+
+    #[test]
+    fn flatten_falls_back_to_unstable_available_models() {
+        let state = serde_json::json!({
+            "currentModelId": "sonnet",
+            "availableModels": [
+                { "modelId": "sonnet", "name": "Sonnet" },
+                { "modelId": "opus" }
+            ]
+        });
+        let (models, current) = super::flatten_model_catalog(&[], Some(&state));
+        assert_eq!(current.as_deref(), Some("sonnet"));
+        assert_eq!(models.len(), 2);
+        // A model without a name is labelled by its id rather than blank.
+        assert_eq!(models[1].name, "opus");
+    }
+
+    #[test]
+    fn flatten_prefers_config_options_and_never_duplicates() {
+        let state = serde_json::json!({
+            "currentModelId": "ignored",
+            "availableModels": [{ "modelId": "openai/gpt-5.6-terra", "name": "dup" }]
+        });
+        let (models, current) =
+            super::flatten_model_catalog(&[kilo_model_config_option()], Some(&state));
+        // Stable dialect wins outright: the unstable list contributes nothing,
+        // so the same id cannot appear twice.
+        assert_eq!(models.len(), 3);
+        assert_eq!(current.as_deref(), Some("openai/gpt-5.6-terra"));
+    }
+
+    #[test]
+    fn flatten_yields_empty_catalog_when_agent_advertises_none() {
+        let (models, current) = super::flatten_model_catalog(&[], None);
+        assert!(models.is_empty());
+        assert!(current.is_none());
+    }
+
+    #[test]
+    fn filter_empty_provider_list_keeps_everything() {
+        let (models, _) = super::flatten_model_catalog(&[kilo_model_config_option()], None);
+        let kept = super::filter_models_by_provider(models, &[]);
+        assert_eq!(kept.len(), 3);
+    }
+
+    #[test]
+    fn filter_keeps_only_named_providers() {
+        let (models, _) = super::flatten_model_catalog(&[kilo_model_config_option()], None);
+        let kept = super::filter_models_by_provider(
+            models,
+            &["openai".to_string(), "alibaba-token-plan".to_string()],
+        );
+        assert_eq!(kept.len(), 2);
+        assert!(kept.iter().all(|m| !m.id.starts_with("openrouter/")));
+    }
+
+    #[test]
+    fn filter_matches_flat_ids_whole() {
+        // An agent with no provider prefix (e.g. claude-agent-acp's "sonnet")
+        // must remain filterable rather than matching nothing.
+        let models = vec![
+            super::CatalogModel {
+                id: "sonnet".into(),
+                name: "Sonnet".into(),
+            },
+            super::CatalogModel {
+                id: "opus".into(),
+                name: "Opus".into(),
+            },
+        ];
+        let kept = super::filter_models_by_provider(models, &["sonnet".to_string()]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, "sonnet");
+    }
+
+    #[test]
+    fn truncate_keeps_everything_under_budget() {
+        let (models, _) = super::flatten_model_catalog(&[kilo_model_config_option()], None);
+        let (kept, truncated) = super::truncate_models_to_budget(models, 48_000);
+        assert_eq!(kept.len(), 3);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn truncate_caps_an_oversized_catalog_and_flags_it() {
+        // Regression guard for the real failure this exists to prevent: the
+        // generic frame trimmer cannot shrink short model ids, so an
+        // un-truncated oversized catalog would be replaced by the "payload too
+        // large" stub — the desktop would see no models at all instead of some.
+        let models: Vec<_> = (0..1_000)
+            .map(|i| super::CatalogModel {
+                id: format!("openrouter/vendor/model-{i}"),
+                name: format!("OpenRouter/Model {i}"),
+            })
+            .collect();
+        let (kept, truncated) = super::truncate_models_to_budget(models, 4_000);
+        assert!(truncated);
+        assert!(
+            !kept.is_empty(),
+            "a budget this size must still fit some models"
+        );
+        let serialized = serde_json::to_string(&kept).expect("kept models serialize");
+        assert!(
+            serialized.len() <= 4_000,
+            "kept list must respect the budget, got {} bytes",
+            serialized.len()
+        );
+    }
+
+    #[test]
+    fn truncate_with_zero_budget_keeps_nothing_and_flags_it() {
+        let models = vec![super::CatalogModel {
+            id: "a".into(),
+            name: "A".into(),
+        }];
+        let (kept, truncated) = super::truncate_models_to_budget(models, 0);
+        assert!(kept.is_empty());
+        assert!(truncated);
     }
 
     #[test]
