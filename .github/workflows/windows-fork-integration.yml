@@ -6,10 +6,60 @@ on:
 
 permissions:
   contents: read
+  actions: read
+
+concurrency:
+  group: windows-integration-client
+  cancel-in-progress: false
+
+env:
+  CANONICAL_WINDOWS_BRANCH: windows-integration
+  # Last product-valid client before the single cumulative branch existed.
+  WINDOWS_INTEGRATION_BOOTSTRAP_SHA: 1a3084e4d3a7a93492ac9a82ebdfffb40c2def39
 
 jobs:
+  validate-cumulative-lineage:
+    name: Validate cumulative Windows client lineage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve previous successful Windows build
+        id: previous
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          previous_sha=$(
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/windows-fork-integration.yml/runs?branch=${CANONICAL_WINDOWS_BRANCH}&status=success&per_page=20" \
+              --jq '.workflow_runs[].head_sha' \
+              | head -n 1
+          )
+          if [[ -z "$previous_sha" ]]; then
+            previous_sha="$WINDOWS_INTEGRATION_BOOTSTRAP_SHA"
+            echo "Using product-valid bootstrap baseline $previous_sha"
+          fi
+          git fetch --no-tags origin "$previous_sha"
+          echo "sha=$previous_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Verify cumulative lineage and retained client surfaces
+        shell: bash
+        env:
+          PREVIOUS_SHA: ${{ steps.previous.outputs.sha }}
+        run: |
+          set -euo pipefail
+          scripts/verify-windows-client-lineage.sh \
+            "$PREVIOUS_SHA" "$GITHUB_SHA" "$GITHUB_REF_NAME"
+          scripts/check-windows-client-contract.sh "$GITHUB_SHA"
+
   build:
     name: Build unsigned Windows integration installer
+    needs: validate-cumulative-lineage
     if: github.repository == 'Jari81/buzz'
     runs-on: windows-latest
     timeout-minutes: 90

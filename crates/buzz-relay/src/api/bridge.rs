@@ -948,6 +948,13 @@ pub async fn query_events(
     result
 }
 
+fn writer_consistent_requested(filter: &Value) -> bool {
+    filter
+        .get("writer_consistent")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 /// Filter execution for [`query_events`], run once NIP-98 auth succeeds.
 /// Handles admission, replay, membership, and all filter paths so the thin
 /// wrapper above can emit exactly one terminal attribution line from the Result.
@@ -1215,7 +1222,7 @@ async fn query_events_authed(
     // skips and the `before_id` BAD_REQUEST are decided here, before any DB
     // work is issued (validation errors are deterministic client mistakes, so
     // surfacing them ahead of transient DB errors is strictly more predictable).
-    let mut catchall_queries: Vec<(usize, buzz_db::EventQuery)> = Vec::new();
+    let mut catchall_queries: Vec<(usize, buzz_db::EventQuery, bool)> = Vec::new();
     for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
         if handled.contains(&idx) {
             continue;
@@ -1276,7 +1283,7 @@ async fn query_events_authed(
             query.offset = Some(offset);
         }
 
-        catchall_queries.push((idx, query));
+        catchall_queries.push((idx, query, writer_consistent_requested(raw)));
     }
 
     // Phase 2 — DB reads, bounded-concurrent, order-preserving (`buffered`).
@@ -1284,10 +1291,19 @@ async fn query_events_authed(
     // and error semantics match the previous serial loop.
     use futures_util::stream::{self, StreamExt};
     let db = state.db.clone();
-    let mut catchall_results = stream::iter(catchall_queries.into_iter().map(|(idx, query)| {
-        let db = db.clone();
-        async move { (idx, db.query_events_routed("bridge_query", &query).await) }
-    }))
+    let mut catchall_results = stream::iter(catchall_queries.into_iter().map(
+        |(idx, query, writer_consistent)| {
+            let db = db.clone();
+            async move {
+                let result = if writer_consistent {
+                    db.query_events(&query).await
+                } else {
+                    db.query_events_routed("bridge_query", &query).await
+                };
+                (idx, result)
+            }
+        },
+    ))
     .buffered(crate::handlers::req::FILTER_QUERY_CONCURRENCY);
 
     // Phase 3 — post-processing, strictly in filter order.
@@ -2250,6 +2266,20 @@ mod tests {
     use super::*;
     use nostr::{Alphabet, EventBuilder, Keys, Kind, SingleLetterTag, Tag};
     use std::sync::Mutex;
+
+    #[test]
+    fn writer_consistent_query_requires_explicit_boolean_true() {
+        assert!(writer_consistent_requested(&serde_json::json!({
+            "writer_consistent": true
+        })));
+        assert!(!writer_consistent_requested(&serde_json::json!({
+            "writer_consistent": false
+        })));
+        assert!(!writer_consistent_requested(&serde_json::json!({
+            "writer_consistent": "true"
+        })));
+        assert!(!writer_consistent_requested(&serde_json::json!({})));
+    }
 
     fn redis_pool() -> deadpool_redis::Pool {
         let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());

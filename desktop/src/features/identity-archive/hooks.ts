@@ -64,10 +64,16 @@ export function useIsArchivedPredicate(): (pubkey: string) => boolean {
 }
 
 /** Gates the owner-path archive button via the target's live `kind:0`. */
+export function oaOwnerQueryKey(pubkey: string, viewerPubkey: string) {
+  return ["oaOwner", pubkey.toLowerCase(), viewerPubkey.toLowerCase()] as const;
+}
+
 export function useOaOwnerQuery(pubkey: string, enabled = true) {
+  const identityQuery = useIdentityQuery();
+  const viewerPubkey = identityQuery.data?.pubkey;
   return useQuery({
-    enabled,
-    queryKey: ["oaOwner", pubkey.toLowerCase()] as const,
+    enabled: enabled && Boolean(viewerPubkey),
+    queryKey: oaOwnerQueryKey(pubkey, viewerPubkey ?? ""),
     queryFn: () => resolveOaOwner(pubkey),
     staleTime: 60_000,
   });

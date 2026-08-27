@@ -23,7 +23,7 @@ export function PersonaActionsMenu({
   onDuplicate,
   onEdit,
   onShare,
-  onDeactivate,
+  onHideBuiltin,
   onDelete,
 }: {
   isActionPending: boolean;
@@ -37,7 +37,7 @@ export function PersonaActionsMenu({
     persona: AgentPersona,
     linkedAgent: ManagedAgent | undefined,
   ) => void;
-  onDeactivate: (persona: AgentPersona) => void;
+  onHideBuiltin: (persona: AgentPersona) => void;
   onDelete: (persona: AgentPersona) => void;
 }) {
   const disabled = isActionPending || isPending;
@@ -86,11 +86,15 @@ export function PersonaActionsMenu({
           </DropdownMenuItem>
         ) : (
           <DropdownMenuItem
-            className="text-destructive focus:text-destructive"
+            className={
+              persona.isBuiltIn
+                ? undefined
+                : "text-destructive focus:text-destructive"
+            }
             disabled={disabled}
             onClick={() => {
               if (persona.isBuiltIn) {
-                onDeactivate(persona);
+                onHideBuiltin(persona);
                 return;
               }
 
@@ -98,7 +102,7 @@ export function PersonaActionsMenu({
             }}
           >
             <Trash2 className="h-4 w-4" />
-            Delete
+            {persona.isBuiltIn ? "Hide starter agent" : "Delete"}
           </DropdownMenuItem>
         )}
       </DropdownMenuContent>

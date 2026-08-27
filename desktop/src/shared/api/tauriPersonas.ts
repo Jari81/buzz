@@ -162,6 +162,21 @@ export async function deletePersona(id: string): Promise<void> {
   await invokeTauri("delete_persona", { id });
 }
 
+export async function listHiddenBuiltinPersonas(): Promise<string[]> {
+  return invokeTauri<string[]>("list_hidden_builtin_personas");
+}
+
+export async function setBuiltinPersonaHidden(
+  id: string,
+  hidden: boolean,
+): Promise<string[]> {
+  return invokeTauri<string[]>("set_builtin_persona_hidden", { id, hidden });
+}
+
+export async function restoreBuiltinPersonas(): Promise<string[]> {
+  return invokeTauri<string[]>("restore_builtin_personas");
+}
+
 export async function setPersonaActive(
   id: string,
   active: boolean,

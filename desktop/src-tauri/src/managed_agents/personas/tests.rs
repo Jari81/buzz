@@ -1,6 +1,7 @@
 use super::{
     built_in_persona_records, ensure_persona_ids_are_active, ensure_persona_is_active,
-    merge_personas, migrate_retired_personas, validate_persona_activation_change,
+    load_hidden_builtin_personas_from_path, merge_personas, migrate_retired_personas,
+    set_builtin_persona_hidden_in_path, validate_persona_activation_change,
     validate_persona_deletion, BUILT_IN_PERSONAS, RETIRED_PERSONAS,
 };
 use crate::managed_agents::discovery::{default_agent_command, effective_agent_command};
@@ -64,6 +65,34 @@ fn merge_personas_preserves_custom_records() {
 
     assert!(changed);
     assert!(records.iter().any(|record| record.id == custom.id));
+}
+
+#[test]
+fn hidden_builtin_persona_store_is_local_idempotent_and_restorable() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("builtin-visibility.json");
+
+    assert!(load_hidden_builtin_personas_from_path(&path)
+        .unwrap()
+        .is_empty());
+
+    set_builtin_persona_hidden_in_path(&path, "builtin:fizz", true).unwrap();
+    set_builtin_persona_hidden_in_path(&path, "builtin:fizz", true).unwrap();
+    set_builtin_persona_hidden_in_path(&path, "builtin:honey", true).unwrap();
+    set_builtin_persona_hidden_in_path(&path, "builtin:fizz", false).unwrap();
+
+    let hidden = load_hidden_builtin_personas_from_path(&path).unwrap();
+    assert_eq!(
+        hidden,
+        std::collections::BTreeSet::from(["builtin:honey".to_string()])
+    );
+
+    let persisted: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(
+        persisted,
+        serde_json::json!({ "hidden_builtin_ids": ["builtin:honey"] })
+    );
 }
 
 #[test]

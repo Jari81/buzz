@@ -9,9 +9,12 @@ import {
   useCreatePersonaMutation,
   useDeletePersonaMutation,
   useExportAgentSnapshotMutation,
+  useHiddenBuiltinPersonasQuery,
   usePersonasQuery,
   usePreviewAgentSnapshotImportMutation,
   useConfirmAgentSnapshotImportMutation,
+  useRestoreBuiltinPersonasMutation,
+  useSetBuiltinPersonaHiddenMutation,
   useSetPersonaActiveMutation,
   useUpdatePersonaMutation,
   type AgentSnapshotImportPreview,
@@ -72,6 +75,7 @@ export function usePersonaActions() {
   const identityQuery = useIdentityQuery();
   const communityId = activeCommunity?.id ?? null;
   const personasQuery = usePersonasQuery();
+  const hiddenBuiltinPersonasQuery = useHiddenBuiltinPersonasQuery();
   const catalogQuery = usePersonaCatalogQuery(communityId);
   usePersonaCatalogLiveUpdates(communityId);
   const setCatalogSharedMutation =
@@ -88,6 +92,8 @@ export function usePersonaActions() {
     useUpdatePersonaAndPublishMutation(communityId);
   const deletePersonaMutation = useDeletePersonaMutation();
   const setPersonaActiveMutation = useSetPersonaActiveMutation();
+  const setBuiltinPersonaHiddenMutation = useSetBuiltinPersonaHiddenMutation();
+  const restoreBuiltinPersonasMutation = useRestoreBuiltinPersonasMutation();
   const exportAgentSnapshotMutation = useExportAgentSnapshotMutation();
   const previewSnapshotImportMutation = usePreviewAgentSnapshotImportMutation();
   const confirmSnapshotImportMutation = useConfirmAgentSnapshotImportMutation();
@@ -158,6 +164,10 @@ export function usePersonaActions() {
   const libraryPersonas = React.useMemo(
     () => getLibraryPersonas(personas),
     [personas],
+  );
+  const hiddenBuiltinPersonaIds = React.useMemo(
+    () => new Set(hiddenBuiltinPersonasQuery.data ?? []),
+    [hiddenBuiltinPersonasQuery.data],
   );
   const personaLabelsById = React.useMemo(
     () => getPersonaLabelsById(personas),
@@ -364,6 +374,37 @@ export function usePersonaActions() {
     }
   }
 
+  async function handleHideBuiltin(persona: AgentPersona) {
+    clearFeedback("library");
+    try {
+      await setBuiltinPersonaHiddenMutation.mutateAsync({
+        id: persona.id,
+        hidden: true,
+      });
+      setPersonaNoticeMessage(`Hidden starter agent ${persona.displayName}.`);
+    } catch (error) {
+      setPersonaErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Failed to hide starter agent.",
+      );
+    }
+  }
+
+  async function handleRestoreBuiltins() {
+    clearFeedback("library");
+    try {
+      await restoreBuiltinPersonasMutation.mutateAsync();
+      setPersonaNoticeMessage("Restored hidden starter agents.");
+    } catch (error) {
+      setPersonaErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Failed to restore starter agents.",
+      );
+    }
+  }
+
   async function handleImportSnapshotFile(
     fileBytes: number[],
     fileName: string,
@@ -562,6 +603,8 @@ export function usePersonaActions() {
     updatePersonaAndPublishMutation.isPending ||
     deletePersonaMutation.isPending ||
     setPersonaActiveMutation.isPending ||
+    setBuiltinPersonaHiddenMutation.isPending ||
+    restoreBuiltinPersonasMutation.isPending ||
     exportAgentSnapshotMutation.isPending ||
     previewSnapshotImportMutation.isPending ||
     confirmSnapshotImportMutation.isPending ||
@@ -569,6 +612,7 @@ export function usePersonaActions() {
 
   return {
     personasQuery,
+    hiddenBuiltinPersonasQuery,
     catalogQuery,
     acpRuntimesQuery,
     createPersonaMutation,
@@ -577,6 +621,7 @@ export function usePersonaActions() {
     setPersonaActiveMutation,
     catalogPersonas,
     libraryPersonas,
+    hiddenBuiltinPersonaIds,
     personaLabelsById,
     isPending,
     personaDialogState,
@@ -594,6 +639,8 @@ export function usePersonaActions() {
     handleSubmit,
     handleDelete,
     handleSetActive,
+    handleHideBuiltin,
+    handleRestoreBuiltins,
     prepareCreate,
     openEdit,
     openDuplicate,

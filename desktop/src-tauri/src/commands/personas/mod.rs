@@ -3,8 +3,9 @@ use tauri::AppHandle;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        current_instance_id, delete_agent_key, load_managed_agents, load_personas, load_teams,
-        save_managed_agents, save_personas, stop_managed_agent_process,
+        current_instance_id, delete_agent_key, load_hidden_builtin_personas, load_managed_agents,
+        load_personas, load_teams, save_managed_agents, save_personas,
+        set_builtin_persona_hidden as persist_builtin_persona_hidden, stop_managed_agent_process,
         sync_managed_agent_processes, try_regenerate_nest, validate_persona_activation_change,
         validate_persona_deletion, AgentDefinition, ManagedAgentRecord,
     },
@@ -51,6 +52,68 @@ pub async fn list_personas(app: AppHandle) -> Result<Vec<AgentDefinition>, Strin
         let mut personas = load_personas(&app)?;
         pending::project_active_persona_sharing(&app, &state, &mut personas);
         Ok(personas)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn list_hidden_builtin_personas(app: AppHandle) -> Result<Vec<String>, String> {
+    use tauri::Manager;
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        Ok(load_hidden_builtin_personas(&app)?.into_iter().collect())
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn set_builtin_persona_hidden(
+    id: String,
+    hidden: bool,
+    app: AppHandle,
+) -> Result<Vec<String>, String> {
+    use tauri::Manager;
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let personas = load_personas(&app)?;
+        let persona = personas
+            .iter()
+            .find(|record| record.id == id)
+            .ok_or_else(|| format!("agent {id} not found"))?;
+        if !persona.is_builtin {
+            return Err("Only built-in agents can be hidden this way.".to_string());
+        }
+        Ok(persist_builtin_persona_hidden(&app, &id, hidden)?
+            .into_iter()
+            .collect())
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn restore_builtin_personas(app: AppHandle) -> Result<Vec<String>, String> {
+    use tauri::Manager;
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        for id in load_hidden_builtin_personas(&app)? {
+            persist_builtin_persona_hidden(&app, &id, false)?;
+        }
+        Ok(Vec::new())
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?

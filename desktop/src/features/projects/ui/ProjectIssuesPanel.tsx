@@ -11,6 +11,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { useIsManagedAgent } from "@/features/agent-memory/hooks";
+import { useOaOwnerQuery } from "@/features/identity-archive/hooks";
 import { ForumComposer } from "@/features/forum/ui/ForumComposer";
 import {
   type ProjectIssue,
@@ -410,6 +411,11 @@ function IssueMetaRail({
   const isAuthor = viewer === normalizePubkey(issue.author);
   const isOwner = viewer === normalizePubkey(project.owner);
   const isManagedAgentOwner = useIsManagedAgent(project.owner) === true;
+  const oaOwnerQuery = useOaOwnerQuery(
+    project.owner,
+    Boolean(viewer) && !isOwner && !isManagedAgentOwner,
+  );
+  const isOaOwner = oaOwnerQuery.data?.isMe === true;
   // Same trust rule as parsing (assigneesForIssue): the issue author or
   // repo owner (directly or via a managed agent) can assign anyone;
   // everyone else who is signed in may still self-assign.
@@ -417,6 +423,7 @@ function IssueMetaRail({
     Boolean(viewer) && (isAuthor || isOwner || isManagedAgentOwner);
   const canChangeStatus = canChangeProjectIssueStatus({
     isManagedAgentOwner,
+    isOaOwner,
     issueAssignees: issue.assignees,
     issueAuthor: issue.author,
     projectOwner: project.owner,

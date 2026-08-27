@@ -1,5 +1,6 @@
-use std::fs;
+use std::{collections::BTreeSet, fs, path::Path};
 
+use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
 use crate::{managed_agents::AgentDefinition, util::now_iso};
@@ -60,6 +61,14 @@ const BUILT_IN_PERSONAS: &[BuiltInPersona] = &[
         default_active: true,
     },
 ];
+
+const BUILTIN_VISIBILITY_FILE: &str = "builtin-visibility.json";
+
+#[derive(Default, Deserialize, Serialize)]
+struct BuiltinVisibility {
+    #[serde(default)]
+    hidden_builtin_ids: BTreeSet<String>,
+}
 
 pub(crate) fn built_in_persona_avatar_url(id: &str) -> Option<&'static str> {
     BUILT_IN_PERSONAS
@@ -206,6 +215,59 @@ fn merge_personas(mut stored: Vec<AgentDefinition>, now: &str) -> (Vec<AgentDefi
 
     sort_personas(&mut stored);
     (stored, changed)
+}
+
+fn builtin_visibility_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    Ok(crate::managed_agents::storage::managed_agents_base_dir(app)?.join(BUILTIN_VISIBILITY_FILE))
+}
+
+fn load_hidden_builtin_personas_from_path(path: &Path) -> Result<BTreeSet<String>, String> {
+    if !path.exists() {
+        return Ok(BTreeSet::new());
+    }
+    let content = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read built-in visibility: {error}"))?;
+    let visibility: BuiltinVisibility = serde_json::from_str(&content)
+        .map_err(|error| format!("failed to parse built-in visibility: {error}"))?;
+    Ok(visibility.hidden_builtin_ids)
+}
+
+fn save_hidden_builtin_personas_to_path(
+    path: &Path,
+    hidden_builtin_ids: &BTreeSet<String>,
+) -> Result<(), String> {
+    let payload = serde_json::to_vec_pretty(&BuiltinVisibility {
+        hidden_builtin_ids: hidden_builtin_ids.clone(),
+    })
+    .map_err(|error| format!("failed to encode built-in visibility: {error}"))?;
+    crate::managed_agents::storage::atomic_write_json(path, &payload)
+}
+
+fn set_builtin_persona_hidden_in_path(
+    path: &Path,
+    id: &str,
+    hidden: bool,
+) -> Result<BTreeSet<String>, String> {
+    let mut hidden_builtin_ids = load_hidden_builtin_personas_from_path(path)?;
+    if hidden {
+        hidden_builtin_ids.insert(id.to_string());
+    } else {
+        hidden_builtin_ids.remove(id);
+    }
+    save_hidden_builtin_personas_to_path(path, &hidden_builtin_ids)?;
+    Ok(hidden_builtin_ids)
+}
+
+pub(crate) fn load_hidden_builtin_personas(app: &AppHandle) -> Result<BTreeSet<String>, String> {
+    load_hidden_builtin_personas_from_path(&builtin_visibility_path(app)?)
+}
+
+pub(crate) fn set_builtin_persona_hidden(
+    app: &AppHandle,
+    id: &str,
+    hidden: bool,
+) -> Result<BTreeSet<String>, String> {
+    set_builtin_persona_hidden_in_path(&builtin_visibility_path(app)?, id, hidden)
 }
 
 /// Soft-deprecate retired built-in personas by appending " (retired)" to

@@ -458,7 +458,10 @@ pub async fn cmd_delete_repo(client: &BuzzClient, repo_id: &str) -> Result<(), C
         )));
     }
 
-    println!("{}", serde_json::json!({ "deleted": repo_id, "status": "ok" }));
+    println!(
+        "{}",
+        serde_json::json!({ "deleted": repo_id, "status": "ok" })
+    );
     Ok(())
 }
 

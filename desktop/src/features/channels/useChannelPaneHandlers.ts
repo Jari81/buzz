@@ -107,11 +107,25 @@ export function useChannelPaneHandlers({
   const markRevealedRepliesReadRef = React.useRef(markRevealedRepliesRead);
   markRevealedRepliesReadRef.current = markRevealedRepliesRead;
 
+  const panelStateTimerRef = React.useRef<number | null>(null);
   const deferPanelState = React.useCallback((update: () => void) => {
-    window.setTimeout(() => {
+    if (panelStateTimerRef.current !== null) {
+      window.clearTimeout(panelStateTimerRef.current);
+    }
+    panelStateTimerRef.current = window.setTimeout(() => {
+      panelStateTimerRef.current = null;
       React.startTransition(update);
     }, 0);
   }, []);
+
+  React.useEffect(
+    () => () => {
+      if (panelStateTimerRef.current !== null) {
+        window.clearTimeout(panelStateTimerRef.current);
+      }
+    },
+    [],
+  );
 
   const handleCancelThreadReply = React.useCallback(() => {
     setThreadReplyTargetId(openThreadHeadIdRef.current);
@@ -198,20 +212,11 @@ export function useChannelPaneHandlers({
 
   const handleOpenThread = React.useCallback(
     (message: { id: string }) => {
-      if (openThreadHeadIdRef.current === message.id) {
-        deferPanelState(() => {
-          onOptimisticOpenThreadHeadIdChange(null);
-          setOpenThreadHeadId(null);
-          setThreadReplyTargetId(null);
-          setThreadScrollTargetId(null);
-          setExpandedThreadReplyIds(new Set());
-        });
-        setEditTargetId(null);
-        return;
-      }
-
       deferPanelState(() => {
         onOptimisticOpenThreadHeadIdChange(message.id);
+        if (openThreadHeadIdRef.current === message.id) {
+          return;
+        }
         setOpenThreadHeadId(message.id);
         setThreadReplyTargetId(message.id);
         setThreadScrollTargetId(null);

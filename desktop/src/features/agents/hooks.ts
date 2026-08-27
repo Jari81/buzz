@@ -53,7 +53,10 @@ import { bootstrapManagedAgentRuntimePairs } from "@/features/agents/managedAgen
 import {
   createPersona,
   deletePersona,
+  listHiddenBuiltinPersonas,
   listPersonas,
+  restoreBuiltinPersonas,
+  setBuiltinPersonaHidden,
   setPersonaActive,
   updatePersona,
 } from "@/shared/api/tauriPersonas";
@@ -123,6 +126,9 @@ export const managedAgentLogFocusRefetchPolicy = {
 export const relayAgentsQueryKey = ["relay-agents"] as const;
 export const managedAgentsQueryKey = ["managed-agents"] as const;
 export const personasQueryKey = ["personas"] as const;
+export const hiddenBuiltinPersonasQueryKey = [
+  "hidden-builtin-personas",
+] as const;
 export const acpRuntimesQueryKey = ["acp-runtimes"] as const;
 export const acpAuthMethodsQueryKey = ["acp-auth-methods"] as const;
 export const managedAgentPrereqsQueryKey = ["managed-agent-prereqs"] as const;
@@ -309,6 +315,34 @@ export function usePersonasQuery(options?: { enabled?: boolean }) {
     // `agents-data-changed`, which `useAgentsDataRefresh` coalesces into an
     // invalidate (200ms window). The 30s poll was belt-and-suspenders on top of
     // that event path — redundant disk-read IPC.
+  });
+}
+
+export function useHiddenBuiltinPersonasQuery() {
+  return useQuery({
+    queryKey: hiddenBuiltinPersonasQueryKey,
+    queryFn: listHiddenBuiltinPersonas,
+  });
+}
+
+export function useSetBuiltinPersonaHiddenMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, hidden }: { id: string; hidden: boolean }) =>
+      setBuiltinPersonaHidden(id, hidden),
+    onSuccess: (hiddenIds) => {
+      queryClient.setQueryData(hiddenBuiltinPersonasQueryKey, hiddenIds);
+    },
+  });
+}
+
+export function useRestoreBuiltinPersonasMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: restoreBuiltinPersonas,
+    onSuccess: (hiddenIds) => {
+      queryClient.setQueryData(hiddenBuiltinPersonasQueryKey, hiddenIds);
+    },
   });
 }
 

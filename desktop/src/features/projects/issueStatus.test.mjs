@@ -10,6 +10,7 @@ import {
 const OWNER = "a".repeat(64);
 const AUTHOR = "b".repeat(64);
 const ASSIGNEE = "d".repeat(64);
+const OA_OWNER = "e".repeat(64);
 const STRANGER = "c".repeat(64);
 
 test("every publishable lifecycle state maps to the label the read path derives", () => {
@@ -40,6 +41,7 @@ test("issue author and repo owner may change status", () => {
     assert.equal(
       canChangeProjectIssueStatus({
         isManagedAgentOwner: false,
+        isOaOwner: false,
         issueAssignees: [],
         issueAuthor: AUTHOR,
         projectOwner: OWNER,
@@ -54,6 +56,7 @@ test("an assignee may change status", () => {
   assert.equal(
     canChangeProjectIssueStatus({
       isManagedAgentOwner: false,
+      isOaOwner: false,
       issueAssignees: [ASSIGNEE],
       issueAuthor: AUTHOR,
       projectOwner: OWNER,
@@ -67,6 +70,7 @@ test("a third party may not change status", () => {
   assert.equal(
     canChangeProjectIssueStatus({
       isManagedAgentOwner: false,
+      isOaOwner: false,
       issueAssignees: [ASSIGNEE],
       issueAuthor: AUTHOR,
       projectOwner: OWNER,
@@ -80,6 +84,7 @@ test("a signed-out viewer may not change status", () => {
   assert.equal(
     canChangeProjectIssueStatus({
       isManagedAgentOwner: true,
+      isOaOwner: false,
       issueAssignees: [],
       issueAuthor: AUTHOR,
       projectOwner: OWNER,
@@ -93,10 +98,25 @@ test("the human owner of a managed-agent repo owner may change status", () => {
   assert.equal(
     canChangeProjectIssueStatus({
       isManagedAgentOwner: true,
+      isOaOwner: false,
       issueAssignees: [],
       issueAuthor: AUTHOR,
       projectOwner: OWNER,
       viewer: STRANGER,
+    }),
+    true,
+  );
+});
+
+test("the verified NIP-OA owner of an external repo-owner agent may change status", () => {
+  assert.equal(
+    canChangeProjectIssueStatus({
+      isManagedAgentOwner: false,
+      isOaOwner: true,
+      issueAssignees: [],
+      issueAuthor: AUTHOR,
+      projectOwner: OWNER,
+      viewer: OA_OWNER,
     }),
     true,
   );

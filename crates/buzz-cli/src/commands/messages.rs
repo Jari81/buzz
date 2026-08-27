@@ -350,6 +350,39 @@ fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
     }
 }
 
+fn select_unique_event_by_id(
+    events: &[serde_json::Value],
+    event_id: &str,
+) -> Result<serde_json::Value, CliError> {
+    let matches = events
+        .iter()
+        .filter(|event| event.get("id").and_then(serde_json::Value::as_str) == Some(event_id))
+        .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        return Err(CliError::Other(format!(
+            "event {event_id} is missing or ambiguous"
+        )));
+    }
+    let event = matches[0].clone();
+    let signed: nostr::Event = serde_json::from_value(event.clone())
+        .map_err(|error| CliError::Other(format!("invalid signed event: {error}")))?;
+    signed
+        .verify()
+        .map_err(|error| CliError::Other(format!("invalid event signature: {error}")))?;
+    Ok(event)
+}
+
+fn event_by_id_query(event_id: &str) -> serde_json::Value {
+    serde_json::json!({"ids": [event_id], "writer_consistent": true})
+}
+
+pub async fn cmd_get_event(client: &BuzzClient, event_id: &str) -> Result<(), CliError> {
+    validate_hex64(event_id)?;
+    let events = client.query_all(event_by_id_query(event_id)).await?;
+    println!("{}", select_unique_event_by_id(&events, event_id)?);
+    Ok(())
+}
+
 pub async fn cmd_get_messages(
     client: &BuzzClient,
     channel_id: &str,
@@ -944,6 +977,7 @@ pub async fn dispatch(
             )
             .await
         }
+        MessagesCmd::Event { event } => cmd_get_event(client, &event).await,
         MessagesCmd::Get {
             channel,
             limit,
@@ -993,18 +1027,46 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
-        resolve_names_to_pubkeys,
+        event_by_id_query, event_mention_pubkeys, find_root_from_tags, match_profiles_by_name,
+        merge_message_mentions, missing_members, normalize_explicit_mentions, parse_member_pubkeys,
+        resolve_names_to_pubkeys, select_unique_event_by_id,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
     };
+    use nostr::{EventBuilder, Keys};
     use serde_json::json;
 
     const ID_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const ID_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const PUBKEY: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    #[test]
+    fn event_selection_requires_exactly_one_matching_id() {
+        let signed = EventBuilder::text_note("handoff")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let event = serde_json::to_value(&signed).unwrap();
+        let event_id = signed.id.to_hex();
+        assert_eq!(
+            select_unique_event_by_id(std::slice::from_ref(&event), &event_id).unwrap(),
+            event
+        );
+        assert!(select_unique_event_by_id(&[], &event_id).is_err());
+        assert!(select_unique_event_by_id(&[event.clone(), event.clone()], &event_id).is_err());
+
+        let mut forged = event;
+        forged["content"] = json!("tampered");
+        assert!(select_unique_event_by_id(&[forged], &event_id).is_err());
+    }
+
+    #[test]
+    fn exact_event_query_is_writer_consistent() {
+        assert_eq!(
+            event_by_id_query(ID_A),
+            json!({"ids": [ID_A], "writer_consistent": true})
+        );
+    }
 
     // Three real pubkeys (lowercase 64-char hex) used by parse_member_pubkeys tests.
     // See the test's own comment on what `PublicKey::from_hex` actually validates.

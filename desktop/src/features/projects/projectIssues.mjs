@@ -60,12 +60,18 @@ export function allowedActorsForRoot(rootEvent) {
   return allowed;
 }
 
-function latestStatusForIssue(issue, statusEvents, assignees) {
+function latestStatusForIssue(
+  issue,
+  statusEvents,
+  assignees,
+  additionalStatusActors = [],
+) {
   const allowedActors = allowedActorsForRoot(issue);
-  // Assignees are the issue's handlers and may move it just like the author
-  // and repo owner (mirror of canChangeProjectIssueStatus in issueStatus.ts).
-  for (const assignee of assignees) {
-    allowedActors.add(assignee.toLowerCase());
+  // Assignees and a verified NIP-OA owner are status-specific actors. Do not
+  // add them to allowedActorsForRoot: that helper also gates assignments and
+  // pull-request lifecycle events.
+  for (const actor of [...assignees, ...additionalStatusActors]) {
+    allowedActors.add(actor.toLowerCase());
   }
   return statusEvents
     .filter(
@@ -207,6 +213,7 @@ export function eventToProjectIssue(
   issue,
   statusEvents = [],
   commentEvents = [],
+  additionalStatusActors = [],
 ) {
   const issueCommentEvents = commentEvents.filter((event) =>
     event.tags.some(
@@ -221,6 +228,7 @@ export function eventToProjectIssue(
     issue,
     statusEvents,
     assignmentState.assignees,
+    additionalStatusActors,
   );
   const comments = commentsForIssue(issueCommentEvents);
   const title =
@@ -259,9 +267,17 @@ export function projectIssueEventsToIssues(
   issueEvents,
   statusEvents = [],
   commentEvents = [],
+  additionalStatusActors = [],
 ) {
   return [...issueEvents]
-    .map((issue) => eventToProjectIssue(issue, statusEvents, commentEvents))
+    .map((issue) =>
+      eventToProjectIssue(
+        issue,
+        statusEvents,
+        commentEvents,
+        additionalStatusActors,
+      ),
+    )
     .sort((left, right) => right.updatedAt - left.updatedAt);
 }
 

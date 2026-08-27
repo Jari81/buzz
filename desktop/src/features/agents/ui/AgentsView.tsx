@@ -27,6 +27,7 @@ import { useTeamActions } from "./useTeamActions";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { useBakedBuildEnvQuery } from "@/features/agents/hooks";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
+import { visibleLibraryPersonas } from "@/features/agents/lib/builtinVisibility";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { Button } from "@/shared/ui/button";
 import {
@@ -91,6 +92,19 @@ export function AgentsView() {
   const runningAgentCount = agents.managedAgents.filter((agent) =>
     isManagedAgentActive(agent),
   ).length;
+  const visiblePersonas = React.useMemo(
+    () =>
+      visibleLibraryPersonas(
+        personas.libraryPersonas,
+        agents.managedAgents,
+        personas.hiddenBuiltinPersonaIds,
+      ),
+    [
+      agents.managedAgents,
+      personas.hiddenBuiltinPersonaIds,
+      personas.libraryPersonas,
+    ],
+  );
   const hasSavedAgentDefaults = Boolean(
     globalConfig.preferred_runtime?.trim() ||
       globalConfig.provider?.trim() ||
@@ -240,11 +254,13 @@ export function AgentsView() {
                 void agents.handleStartPersona(persona);
               }}
               // Persona props
-              personas={personas.libraryPersonas}
+              personas={visiblePersonas}
               personasError={
                 personas.personasQuery.error instanceof Error
                   ? personas.personasQuery.error
-                  : null
+                  : personas.hiddenBuiltinPersonasQuery.error instanceof Error
+                    ? personas.hiddenBuiltinPersonasQuery.error
+                    : null
               }
               personaFeedbackErrorMessage={
                 personas.personaFeedbackSurface === "library"
@@ -256,14 +272,21 @@ export function AgentsView() {
                   ? personas.personaNoticeMessage
                   : null
               }
-              isPersonasLoading={personas.personasQuery.isLoading}
+              isPersonasLoading={
+                personas.personasQuery.isLoading ||
+                personas.hiddenBuiltinPersonasQuery.isLoading
+              }
               isPersonasPending={personas.isPending}
+              hiddenBuiltinCount={personas.hiddenBuiltinPersonaIds.size}
               onOpenCatalog={openUnifiedCatalog}
               onDuplicatePersona={personas.openDuplicate}
               onEditPersona={personas.openEdit}
               onSharePersona={personas.openShare}
-              onDeactivatePersona={(persona) => {
-                void personas.handleSetActive(persona, false, "library");
+              onHideBuiltinPersona={(persona) => {
+                void personas.handleHideBuiltin(persona);
+              }}
+              onRestoreHiddenBuiltins={() => {
+                void personas.handleRestoreBuiltins();
               }}
               onDeletePersona={personas.openDelete}
             />

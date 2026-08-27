@@ -459,6 +459,12 @@ pub enum MessagesCmd {
         #[arg(long)]
         public_reason: Option<String>,
     },
+    /// Retrieve exactly one event by its Nostr event id
+    Event {
+        /// Event id (64-char hex)
+        #[arg(long)]
+        event: String,
+    },
     /// Retrieve messages from a channel
     #[command(
         after_help = "Examples:\n  buzz messages get --channel <UUID>\n  buzz messages get --channel <UUID> --limit 50 --kinds 1,1984"
@@ -1635,6 +1641,27 @@ pub enum PrCmd {
 
 #[derive(Subcommand)]
 pub enum IssuesCmd {
+    /// Ensure exactly one idempotent NIP-34 issue comment exists for a review handoff
+    Comment {
+        /// Issue event id (64-char hex)
+        #[arg(long)]
+        issue: String,
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Markdown comment body. Use '-' to read from stdin.
+        #[arg(long)]
+        content: String,
+        /// Stable identity used to deduplicate retries
+        #[arg(long)]
+        review_id: String,
+        /// Technical recipient pubkey(s); can be specified multiple times
+        #[arg(long = "to", required = true)]
+        to: Vec<String>,
+    },
     /// Create a git issue (NIP-34 kind:1621)
     Create {
         /// Repo owner pubkey (64-char hex)
@@ -2235,6 +2262,7 @@ mod tests {
             vec![
                 "delete",
                 "edit",
+                "event",
                 "get",
                 "search",
                 "send",
@@ -2342,7 +2370,7 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "issues"),
-            vec!["assign", "create", "get", "list", "status", "unassign"]
+            vec!["assign", "comment", "create", "get", "list", "status", "unassign",]
         );
         assert_eq!(names(&cmd, "media"), vec!["get"]);
         assert_eq!(names(&cmd, "upload"), vec!["file"]);
@@ -2371,9 +2399,9 @@ mod tests {
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
-            ("issues", 6),
+            ("issues", 7),
             ("media", 1),
-            ("messages", 8),
+            ("messages", 9),
             ("pack", 2),
             ("patches", 4),
             ("pr", 5),

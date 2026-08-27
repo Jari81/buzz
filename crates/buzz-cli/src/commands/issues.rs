@@ -1,4 +1,7 @@
 use std::collections::{HashMap, HashSet};
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::path::Path;
 
 use buzz_core::kind::{
     KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
@@ -9,8 +12,10 @@ use crate::commands::with_git_provenance;
 use crate::error::CliError;
 use crate::validate::{read_or_stdin, sdk_err, validate_hex64, validate_repo_id};
 use buzz_sdk::{GitIssueMeta, GitRepoCoord, GitStatusMeta};
-use nostr::Timestamp;
+use fs2::FileExt;
+use nostr::{EventBuilder, Kind, Tag, Timestamp};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 const ISSUE_ASSIGNMENT_LABEL: &str = "assignment";
 const ISSUE_UNASSIGNMENT_LABEL: &str = "unassignment";
@@ -36,7 +41,10 @@ fn issue_status_filter(issue_ids: &[&str]) -> serde_json::Value {
 }
 
 fn status_event_created_at(event: &serde_json::Value) -> i64 {
-    event.get("created_at").and_then(|c| c.as_i64()).unwrap_or(0)
+    event
+        .get("created_at")
+        .and_then(|c| c.as_i64())
+        .unwrap_or(0)
 }
 
 /// Reorder a flat relay response: issue events (kind 1621) first, then their
@@ -115,6 +123,183 @@ struct AssignmentQueryEvent {
     pubkey: String,
     created_at: u64,
     tags: Vec<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct IssueCommentQueryEvent {
+    id: String,
+    kind: u16,
+    pubkey: String,
+    content: String,
+    tags: Vec<Vec<String>>,
+}
+
+fn parse_verified_issue_comment(
+    value: serde_json::Value,
+) -> Result<IssueCommentQueryEvent, CliError> {
+    let signed: nostr::Event = serde_json::from_value(value.clone())
+        .map_err(|error| CliError::Other(format!("invalid signed issue comment: {error}")))?;
+    signed
+        .verify()
+        .map_err(|error| CliError::Other(format!("invalid issue comment signature: {error}")))?;
+    serde_json::from_value(value)
+        .map_err(|error| CliError::Other(format!("invalid issue comment response: {error}")))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ReviewCommentResolution {
+    Create,
+    Reuse(String),
+}
+
+struct ReviewCommentLock {
+    _file: File,
+}
+
+fn acquire_review_comment_lock(
+    directory: &Path,
+    review_id: &str,
+) -> Result<ReviewCommentLock, CliError> {
+    let digest = hex::encode(Sha256::digest(review_id.as_bytes()));
+    let path = directory.join(format!("buzz-issue-review-{digest}.lock"));
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path).map_err(|error| {
+        CliError::Other(format!(
+            "cannot open review comment lock at {}: {error}",
+            path.display()
+        ))
+    })?;
+    file.try_lock_exclusive().map_err(|error| {
+        CliError::Other(format!(
+            "review comment lock is busy at {}: {error}",
+            path.display()
+        ))
+    })?;
+    file.set_len(0)
+        .map_err(|error| CliError::Other(format!("cannot reset review comment lock: {error}")))?;
+    if let Err(error) = writeln!(file, "{}", std::process::id()) {
+        return Err(CliError::Other(format!(
+            "cannot initialize review comment lock: {error}"
+        )));
+    }
+    Ok(ReviewCommentLock { _file: file })
+}
+
+fn canonical_repo_coord(repo_coord: &str) -> String {
+    let mut repo_parts = repo_coord.splitn(3, ':');
+    format!(
+        "{}:{}:{}",
+        repo_parts.next().unwrap_or_default(),
+        repo_parts.next().unwrap_or_default().to_ascii_lowercase(),
+        repo_parts.next().unwrap_or_default()
+    )
+}
+
+fn build_review_comment_query(issue_id: &str, repo_coord: &str, author: &str) -> serde_json::Value {
+    serde_json::json!({
+        "kinds": [1],
+        "authors": [author.to_ascii_lowercase()],
+        "#e": [issue_id.to_ascii_lowercase()],
+        "#a": [canonical_repo_coord(repo_coord)],
+        "writer_consistent": true,
+    })
+}
+
+fn build_review_comment_event(
+    issue_id: &str,
+    repo_coord: &str,
+    review_id: &str,
+    content: &str,
+    recipients: &[String],
+) -> Result<EventBuilder, CliError> {
+    let issue_id = issue_id.to_ascii_lowercase();
+    let repo_coord = canonical_repo_coord(repo_coord);
+    let mut tags = vec![
+        Tag::parse(["e", issue_id.as_str(), "", "root"])
+            .map_err(|error| CliError::Other(format!("invalid issue root tag: {error}")))?,
+        Tag::parse(["a", repo_coord.as_str()])
+            .map_err(|error| CliError::Other(format!("invalid repository tag: {error}")))?,
+        Tag::parse(["review-id", review_id])
+            .map_err(|error| CliError::Other(format!("invalid review-id tag: {error}")))?,
+    ];
+    let mut recipients = recipients
+        .iter()
+        .map(|recipient| recipient.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    recipients.sort();
+    recipients.dedup();
+    for recipient in recipients {
+        tags.push(
+            Tag::parse(["p", recipient.as_str()])
+                .map_err(|error| CliError::Other(format!("invalid recipient tag: {error}")))?,
+        );
+    }
+    Ok(EventBuilder::new(Kind::TextNote, content).tags(tags))
+}
+
+fn resolve_review_comment(
+    events: &[IssueCommentQueryEvent],
+    issue_id: &str,
+    repo_coord: &str,
+    author: &str,
+    review_id: &str,
+    content: &str,
+    recipients: &[String],
+) -> Result<ReviewCommentResolution, CliError> {
+    let matches = events
+        .iter()
+        .filter(|event| {
+            event.tags.iter().any(|tag| {
+                matches!(tag.as_slice(), [name, value, ..] if name == "review-id" && value == review_id)
+            })
+        })
+        .collect::<Vec<_>>();
+    let Some(event) = matches.first() else {
+        return Ok(ReviewCommentResolution::Create);
+    };
+    if matches.len() != 1 {
+        return Err(CliError::Other(format!(
+            "multiple issue comments found for Review-ID {review_id}"
+        )));
+    }
+
+    let root_matches = event.tags.iter().any(|tag| {
+        matches!(tag.as_slice(), [name, value, relay, marker, ..]
+            if name == "e" && value == issue_id && relay.is_empty() && marker == "root")
+    });
+    let repo_matches = event.tags.iter().any(
+        |tag| matches!(tag.as_slice(), [name, value, ..] if name == "a" && value == repo_coord),
+    );
+    let actual_recipients = event
+        .tags
+        .iter()
+        .filter_map(|tag| match tag.as_slice() {
+            [name, value, ..] if name == "p" => Some(value.to_ascii_lowercase()),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    let expected_recipients = recipients
+        .iter()
+        .map(|value| value.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    if event.kind != 1
+        || !event.pubkey.eq_ignore_ascii_case(author)
+        || event.content != content
+        || !root_matches
+        || !repo_matches
+        || actual_recipients != expected_recipients
+    {
+        return Err(CliError::Other(format!(
+            "issue comment for Review-ID {review_id} does not match the requested handoff"
+        )));
+    }
+    Ok(ReviewCommentResolution::Reuse(event.id.clone()))
 }
 
 impl From<&AssignmentQueryEvent> for AssignmentEvent {
@@ -278,6 +463,129 @@ impl IssueAssignmentOperation {
     }
 }
 
+pub async fn cmd_issue_comment(
+    client: &BuzzClient,
+    issue: &str,
+    repo_owner: &str,
+    repo_id: &str,
+    content: &str,
+    review_id: &str,
+    recipients: &[String],
+) -> Result<(), CliError> {
+    validate_hex64(issue)?;
+    validate_hex64(repo_owner)?;
+    validate_repo_id(repo_id)?;
+    for recipient in recipients {
+        validate_hex64(recipient)?;
+    }
+    if review_id.is_empty()
+        || review_id.len() > 256
+        || review_id
+            .chars()
+            .any(|ch| ch.is_control() || ch.is_whitespace())
+    {
+        return Err(CliError::Usage(
+            "--review-id must contain 1..256 non-whitespace characters".into(),
+        ));
+    }
+    let content = read_or_stdin(content)?;
+    if content.is_empty() || content.len() > 10_000 {
+        return Err(CliError::Usage(
+            "--content must contain 1..10000 UTF-8 bytes".into(),
+        ));
+    }
+
+    let author = client.keys().public_key().to_hex();
+    let issue = issue.to_ascii_lowercase();
+    let recipients = recipients
+        .iter()
+        .map(|recipient| recipient.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let repo_coord = format!("30617:{}:{repo_id}", repo_owner.to_ascii_lowercase());
+    let lock_directory = dirs::cache_dir()
+        .ok_or_else(|| CliError::Other("cannot resolve private cache directory".into()))?
+        .join("buzz")
+        .join("locks");
+    std::fs::create_dir_all(&lock_directory).map_err(|error| {
+        CliError::Other(format!("cannot create review lock directory: {error}"))
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&lock_directory, std::fs::Permissions::from_mode(0o700)).map_err(
+            |error| CliError::Other(format!("cannot secure review lock directory: {error}")),
+        )?;
+    }
+    let lock_scope = format!("{author}:{issue}:{repo_coord}:{review_id}");
+    let _lock = acquire_review_comment_lock(&lock_directory, &lock_scope)?;
+    let filter = build_review_comment_query(&issue, &repo_coord, &author);
+    let before = client
+        .query_all(filter.clone())
+        .await?
+        .into_iter()
+        .map(parse_verified_issue_comment)
+        .collect::<Result<Vec<IssueCommentQueryEvent>, _>>()?;
+    if let ReviewCommentResolution::Reuse(event_id) = resolve_review_comment(
+        &before,
+        &issue,
+        &repo_coord,
+        &author,
+        review_id,
+        &content,
+        &recipients,
+    )? {
+        println!(
+            "{}",
+            serde_json::json!({"event_id": event_id, "reused": true})
+        );
+        return Ok(());
+    }
+
+    let event = client.sign_event(build_review_comment_event(
+        &issue,
+        &repo_coord,
+        review_id,
+        &content,
+        &recipients,
+    )?)?;
+    let submitted_event_id = event.id.to_hex();
+    let submit_result = client.submit_event(event).await;
+
+    let after = client
+        .query_all(filter)
+        .await?
+        .into_iter()
+        .map(parse_verified_issue_comment)
+        .collect::<Result<Vec<IssueCommentQueryEvent>, _>>()?;
+    match resolve_review_comment(
+        &after,
+        &issue,
+        &repo_coord,
+        &author,
+        review_id,
+        &content,
+        &recipients,
+    )? {
+        ReviewCommentResolution::Reuse(event_id) => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "event_id": event_id,
+                    "published_event_id": submitted_event_id,
+                    "reused": event_id != submitted_event_id
+                })
+            );
+            Ok(())
+        }
+        ReviewCommentResolution::Create => match submit_result {
+            Err(error) => Err(error),
+            Ok(response) => Err(CliError::Other(format!(
+                "relay accepted no independently readable issue comment: {response}"
+            ))),
+        },
+    }
+}
+
 pub async fn cmd_create_issue(
     client: &BuzzClient,
     repo_owner: &str,
@@ -420,6 +728,30 @@ async fn publish_issue_assignment_operation(
     Ok(())
 }
 
+fn build_issue_assignment_queries(issue: &str, signer: &str) -> [serde_json::Value; 3] {
+    let root_filter = serde_json::json!({
+        "kinds": [1621],
+        "ids": [issue],
+        "limit": 1,
+        "writer_consistent": true,
+    });
+    let assignment_filter = serde_json::json!({
+        "kinds": [1],
+        "#e": [issue],
+        "#t": [ISSUE_ASSIGNMENT_LABEL, ISSUE_UNASSIGNMENT_LABEL],
+        "limit": 500,
+        "writer_consistent": true,
+    });
+    let signer_comment_filter = serde_json::json!({
+        "kinds": [1],
+        "#e": [issue],
+        "authors": [signer],
+        "limit": 1,
+        "writer_consistent": true,
+    });
+    [root_filter, assignment_filter, signer_comment_filter]
+}
+
 async fn issue_assignment_context(
     client: &BuzzClient,
     issue: &str,
@@ -427,26 +759,8 @@ async fn issue_assignment_context(
     signer: &str,
     include_prior: bool,
 ) -> Result<IssueAssignmentContext, CliError> {
-    let root_filter = serde_json::json!({
-        "kinds": [1621],
-        "ids": [issue],
-        "limit": 1
-    });
-    let assignment_filter = serde_json::json!({
-        "kinds": [1],
-        "#e": [issue],
-        "#t": [ISSUE_ASSIGNMENT_LABEL, ISSUE_UNASSIGNMENT_LABEL],
-        "limit": 500
-    });
-    let signer_comment_filter = serde_json::json!({
-        "kinds": [1],
-        "#e": [issue],
-        "authors": [signer],
-        "limit": 1
-    });
-    let response = client
-        .query_multi(&[root_filter, assignment_filter, signer_comment_filter])
-        .await?;
+    let filters = build_issue_assignment_queries(issue, signer);
+    let response = client.query_multi(&filters).await?;
     // CLI read responses intentionally omit signatures, so deserialize only
     // the event fields needed for assignment reduction.
     let events = serde_json::from_str::<Vec<AssignmentQueryEvent>>(&response)
@@ -629,6 +943,25 @@ pub async fn cmd_issue_status(
 pub async fn dispatch(cmd: crate::IssuesCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::IssuesCmd;
     match cmd {
+        IssuesCmd::Comment {
+            issue,
+            repo_owner,
+            repo_id,
+            content,
+            review_id,
+            to,
+        } => {
+            cmd_issue_comment(
+                client,
+                &issue,
+                &repo_owner,
+                &repo_id,
+                &content,
+                &review_id,
+                &to,
+            )
+            .await
+        }
         IssuesCmd::Create {
             repo_owner,
             repo_id,
@@ -715,15 +1048,155 @@ pub async fn dispatch(cmd: crate::IssuesCmd, client: &BuzzClient) -> Result<(), 
 
 #[cfg(test)]
 mod tests {
+    use sha2::{Digest, Sha256};
+
     use super::{
-        assignment_note_label, reduce_assignment_operations, AssignmentEvent, AssignmentQueryEvent,
+        acquire_review_comment_lock, assignment_note_label, build_issue_assignment_queries,
+        build_review_comment_event, build_review_comment_query, parse_verified_issue_comment,
+        reduce_assignment_operations, resolve_review_comment, AssignmentEvent,
+        AssignmentQueryEvent, IssueCommentQueryEvent, ReviewCommentResolution,
         ISSUE_ASSIGNMENT_LABEL, ISSUE_UNASSIGNMENT_LABEL,
     };
+    use nostr::{EventBuilder, Keys};
 
     const ISSUE: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
     const AUTHOR: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const OWNER: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const VOLUNTEER: &str = "5555555555555555555555555555555555555555555555555555555555555555";
+
+    #[test]
+    fn issue_comment_readback_rejects_tampered_signed_events() {
+        let signed = EventBuilder::text_note("review handoff")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let mut event = serde_json::to_value(signed).unwrap();
+        assert!(parse_verified_issue_comment(event.clone()).is_ok());
+
+        event["content"] = serde_json::json!("tampered");
+        assert!(parse_verified_issue_comment(event).is_err());
+    }
+
+    #[test]
+    fn review_comment_lock_serializes_the_same_review_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = acquire_review_comment_lock(dir.path(), "board:task:run-42").unwrap();
+        assert!(acquire_review_comment_lock(dir.path(), "board:task:run-42").is_err());
+        drop(first);
+        acquire_review_comment_lock(dir.path(), "board:task:run-42").unwrap();
+    }
+
+    #[test]
+    fn stale_review_comment_lock_file_does_not_block_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let scope = "board:task:run-42";
+        let digest = Sha256::digest(scope.as_bytes());
+        let path = dir
+            .path()
+            .join(format!("buzz-issue-review-{}.lock", hex::encode(digest)));
+        std::fs::write(path, "stale-owner").unwrap();
+
+        acquire_review_comment_lock(dir.path(), scope).unwrap();
+    }
+
+    #[test]
+    fn review_comment_event_has_issue_root_repo_and_technical_recipient_tags() {
+        let keys = nostr::Keys::generate();
+        let coord = format!("30617:{OWNER}:demo");
+        let uppercase_coord = format!("30617:{}:demo", OWNER.to_ascii_uppercase());
+        let event = build_review_comment_event(
+            &ISSUE.to_ascii_uppercase(),
+            &uppercase_coord,
+            "board:task:run-42",
+            "Testziel: Start\nReview-ID: board:task:run-42",
+            &[VOLUNTEER.to_ascii_uppercase()],
+        )
+        .unwrap()
+        .sign_with_keys(&keys)
+        .unwrap();
+        let tags = event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect::<Vec<_>>();
+
+        assert_eq!(event.kind, nostr::Kind::TextNote);
+        assert!(tags.contains(&vec!["e".into(), ISSUE.into(), "".into(), "root".into()]));
+        assert!(tags.contains(&vec!["a".into(), coord]));
+        assert!(tags.contains(&vec!["review-id".into(), "board:task:run-42".into()]));
+        assert!(tags.contains(&vec!["p".into(), VOLUNTEER.into()]));
+    }
+
+    #[test]
+    fn review_comment_query_is_canonical_writer_consistent_and_unbounded() {
+        assert_eq!(
+            build_review_comment_query(
+                &ISSUE.to_ascii_uppercase(),
+                &format!("30617:{}:demo", OWNER.to_ascii_uppercase()),
+                &AUTHOR.to_ascii_uppercase(),
+            ),
+            serde_json::json!({
+                "kinds": [1],
+                "authors": [AUTHOR],
+                "#e": [ISSUE],
+                "#a": [format!("30617:{OWNER}:demo")],
+                "writer_consistent": true,
+            })
+        );
+    }
+
+    #[test]
+    fn review_comment_ensure_reuses_exact_event_and_rejects_drift_or_duplicates() {
+        let content = "Testziel: Start\nReview-ID: board:task:run-42";
+        let exact = IssueCommentQueryEvent {
+            id: "1".repeat(64),
+            kind: 1,
+            pubkey: AUTHOR.into(),
+            content: content.into(),
+            tags: vec![
+                vec!["e".into(), ISSUE.into(), "".into(), "root".into()],
+                vec!["a".into(), format!("30617:{OWNER}:demo")],
+                vec!["review-id".into(), "board:task:run-42".into()],
+                vec!["p".into(), VOLUNTEER.into()],
+            ],
+        };
+
+        assert_eq!(
+            resolve_review_comment(
+                std::slice::from_ref(&exact),
+                ISSUE,
+                &format!("30617:{OWNER}:demo"),
+                AUTHOR,
+                "board:task:run-42",
+                content,
+                &[VOLUNTEER.to_string()],
+            )
+            .unwrap(),
+            ReviewCommentResolution::Reuse(exact.id.clone())
+        );
+
+        let mut drifted = exact.clone();
+        drifted.content.push_str("\nchanged");
+        assert!(resolve_review_comment(
+            &[drifted],
+            ISSUE,
+            &format!("30617:{OWNER}:demo"),
+            AUTHOR,
+            "board:task:run-42",
+            content,
+            &[VOLUNTEER.to_string()],
+        )
+        .is_err());
+        assert!(resolve_review_comment(
+            &[exact.clone(), exact],
+            ISSUE,
+            &format!("30617:{OWNER}:demo"),
+            AUTHOR,
+            "board:task:run-42",
+            content,
+            &[VOLUNTEER.to_string()],
+        )
+        .is_err());
+    }
 
     fn assignment_event(
         pubkey: &str,
@@ -789,6 +1262,16 @@ mod tests {
 
         assert_eq!(event.kind, 1);
         assert_eq!(event.pubkey, VOLUNTEER);
+    }
+
+    #[test]
+    fn assignment_context_queries_are_writer_consistent() {
+        let queries = build_issue_assignment_queries(ISSUE, VOLUNTEER);
+
+        assert_eq!(queries.len(), 3);
+        assert!(queries
+            .iter()
+            .all(|query| query["writer_consistent"] == serde_json::json!(true)));
     }
 
     #[test]

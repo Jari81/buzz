@@ -46,6 +46,7 @@ type UnifiedAgentsSectionProps = {
   personaFeedbackNoticeMessage: string | null;
   isPersonasLoading: boolean;
   isPersonasPending: boolean;
+  hiddenBuiltinCount: number;
   onOpenCatalog: () => void;
   onDuplicatePersona: (persona: AgentPersona) => void;
   onEditPersona: (persona: AgentPersona) => void;
@@ -54,7 +55,8 @@ type UnifiedAgentsSectionProps = {
     linkedAgent: ManagedAgent | undefined,
     effectiveAvatarUrl: string | null,
   ) => void;
-  onDeactivatePersona: (persona: AgentPersona) => void;
+  onHideBuiltinPersona: (persona: AgentPersona) => void;
+  onRestoreHiddenBuiltins: () => void;
   onDeletePersona: (persona: AgentPersona) => void;
 };
 
@@ -86,11 +88,13 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     personaFeedbackNoticeMessage,
     isPersonasLoading,
     isPersonasPending,
+    hiddenBuiltinCount,
     onOpenCatalog,
     onDuplicatePersona,
     onEditPersona,
     onSharePersona,
-    onDeactivatePersona,
+    onHideBuiltinPersona,
+    onRestoreHiddenBuiltins,
     onDeletePersona,
   } = props;
 
@@ -119,6 +123,19 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     >
       {isLoading ? <LoadingSkeleton /> : null}
 
+      {!isLoading && hiddenBuiltinCount > 0 ? (
+        <div className="flex justify-end">
+          <button
+            className="text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+            disabled={isPersonasPending}
+            onClick={onRestoreHiddenBuiltins}
+            type="button"
+          >
+            Restore hidden starter agents
+          </button>
+        </div>
+      ) : null}
+
       {!isLoading ? (
         <div className="space-y-3" data-testid="unified-agents-groups">
           <div className={IDENTITY_CARD_GRID_CLASS}>
@@ -140,7 +157,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
                       isPending={isPersonasPending}
                       persona={group.persona}
                       linkedAgent={profileAgent}
-                      onDeactivate={onDeactivatePersona}
+                      onHideBuiltin={onHideBuiltinPersona}
                       onDelete={onDeletePersona}
                       onDuplicate={onDuplicatePersona}
                       onEdit={onEditPersona}

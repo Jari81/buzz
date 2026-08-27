@@ -68,12 +68,14 @@ export const ISSUE_LIFECYCLE_STATUSES: ProjectIssueLifecycleStatus[] = [
  * honored instead of silently discarded. */
 export function canChangeProjectIssueStatus({
   isManagedAgentOwner,
+  isOaOwner,
   issueAssignees,
   issueAuthor,
   projectOwner,
   viewer,
 }: {
   isManagedAgentOwner: boolean;
+  isOaOwner: boolean;
   issueAssignees: readonly string[];
   issueAuthor: string;
   projectOwner: string;
@@ -84,6 +86,7 @@ export function canChangeProjectIssueStatus({
     viewer === issueAuthor.toLowerCase() ||
     viewer === projectOwner.toLowerCase() ||
     isManagedAgentOwner ||
+    isOaOwner ||
     issueAssignees.some((assignee) => viewer === assignee.toLowerCase())
   );
 }

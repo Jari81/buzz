@@ -39,6 +39,22 @@ pub(crate) const FILTER_QUERY_CONCURRENCY: usize = 4;
 // the range fails the build.
 const _: () = assert!(FILTER_QUERY_CONCURRENCY >= 2 && FILTER_QUERY_CONCURRENCY <= 8);
 
+/// Issue/PR text-note history can feed causal `prior` tags for assignment and
+/// review operations. Replica lag would turn a successful write into a stale
+/// successor, so this query shape must obey the writer-read rule even though
+/// ordinary display subscriptions may use bounded-staleness routing.
+fn filter_requires_writer_consistency(filter: &Filter) -> bool {
+    let e_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::E);
+    filter
+        .kinds
+        .as_ref()
+        .is_some_and(|kinds| kinds.contains(&nostr::Kind::TextNote))
+        && filter
+            .generic_tags
+            .get(&e_tag)
+            .is_some_and(|values| !values.is_empty())
+}
+
 /// Handle a REQ message: register the subscription, deliver historical events, then send EOSE.
 pub async fn handle_req(
     sub_id: String,
@@ -264,7 +280,7 @@ pub async fn handle_req(
     let mut total_sent: usize = 0;
 
     // Phase 1 — pure query construction, in filter order.
-    let filter_queries: Vec<(usize, Option<uuid::Uuid>, EventQuery)> = filters
+    let filter_queries: Vec<(usize, Option<uuid::Uuid>, EventQuery, bool)> = filters
         .iter()
         .enumerate()
         .map(|(idx, filter)| {
@@ -295,7 +311,12 @@ pub async fn handle_req(
             if filter_can_match_shared_gated_kinds(filter) {
                 params.shared_gated_reader = Some(pubkey_bytes.clone());
             }
-            (idx, per_filter_channel, params)
+            (
+                idx,
+                per_filter_channel,
+                params,
+                filter_requires_writer_consistency(filter),
+            )
         })
         .collect();
 
@@ -306,10 +327,14 @@ pub async fn handle_req(
     use futures_util::stream::{self, StreamExt};
     let db = state.db.clone();
     let mut results = stream::iter(filter_queries.into_iter().map(
-        |(idx, per_filter_channel, params)| {
+        |(idx, per_filter_channel, params, writer_consistent)| {
             let db = db.clone();
             async move {
-                let filter_events = db.query_events_routed("req_historical", &params).await;
+                let filter_events = if writer_consistent {
+                    db.query_events(&params).await
+                } else {
+                    db.query_events_routed("req_historical", &params).await
+                };
                 (idx, per_filter_channel, filter_events)
             }
         },
@@ -1300,6 +1325,25 @@ fn topic_for_subscription(channel_id: Option<uuid::Uuid>) -> EventTopic {
 mod tests {
     use super::*;
     use nostr::{Alphabet, Filter, SingleLetterTag};
+
+    #[test]
+    fn issue_comment_reads_that_feed_assignment_causality_require_writer() {
+        let e_tag = SingleLetterTag::lowercase(Alphabet::E);
+        let issue_id = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+
+        let issue_comments = Filter::new()
+            .kind(nostr::Kind::TextNote)
+            .custom_tag(e_tag, issue_id);
+        assert!(filter_requires_writer_consistency(&issue_comments));
+
+        let channel_thread = Filter::new()
+            .kind(nostr::Kind::Custom(9))
+            .custom_tag(e_tag, issue_id);
+        assert!(!filter_requires_writer_consistency(&channel_thread));
+        assert!(!filter_requires_writer_consistency(
+            &Filter::new().kind(nostr::Kind::TextNote)
+        ));
+    }
 
     #[test]
     fn global_queries_push_access_scope_before_limit() {

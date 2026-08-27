@@ -18,6 +18,7 @@ import {
 const OWNER = "a".repeat(64);
 const AUTHOR = "b".repeat(64);
 const ATTACKER = "c".repeat(64);
+const OA_OWNER = "d".repeat(64);
 const REPO_ADDRESS = `30617:${OWNER}:demo`;
 
 function issueEvent(overrides = {}) {
@@ -107,6 +108,23 @@ test("honors status events from the issue author and repo owner", () => {
   assert.equal(
     eventToProjectIssue(issueEvent(), [ownerClosed]).status,
     PROJECT_ISSUE_STATUS.CLOSED,
+  );
+});
+
+test("honors a status event from the verified NIP-OA owner only when explicitly supplied", () => {
+  const oaOwnerDone = statusEvent({
+    kind: 1631,
+    pubkey: OA_OWNER,
+    createdAt: 300,
+  });
+
+  assert.equal(
+    eventToProjectIssue(issueEvent(), [oaOwnerDone]).status,
+    PROJECT_ISSUE_STATUS.BACKLOG,
+  );
+  assert.equal(
+    eventToProjectIssue(issueEvent(), [oaOwnerDone], [], [OA_OWNER]).status,
+    PROJECT_ISSUE_STATUS.DONE,
   );
 });
 
