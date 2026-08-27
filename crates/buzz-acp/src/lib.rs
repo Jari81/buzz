@@ -1143,6 +1143,9 @@ fn handle_relay_observer_control_event(
         Some("switch_model") => {
             handle_switch_model_control(&payload, pool, observer);
         }
+        Some("list_models") => {
+            handle_list_models_control(&payload, pool, observer);
+        }
         Some("publish_project_owner_announcements") => {
             handle_publish_project_owner_announcements_control(
                 &payload,
@@ -1337,6 +1340,120 @@ fn handle_cancel_turn_control(
             serde_json::json!({
                 "type": "cancel_turn",
                 "status": status,
+            }),
+        );
+    }
+}
+
+/// Bytes reserved for the `models` array of a `list_models` control result.
+///
+/// The remaining headroom under `OBSERVER_MAX_PLAINTEXT_LEN` covers the observer
+/// envelope, the other payload fields, and JSON escaping. Deliberately
+/// conservative, because overflowing here does not degrade gracefully: the
+/// generic trimmer elides only long string leaves (3 KB retain floor per side)
+/// and model ids are 20–50 bytes, so an oversized catalog would be replaced
+/// wholesale by the "payload too large" stub — a silent total loss. Truncating
+/// with an explicit flag is the difference between a short list and no list.
+const LIST_MODELS_ARRAY_BUDGET: usize = 48_000;
+
+/// Handle a `list_models` control frame.
+///
+/// Answers with the agent's cached model catalog, flattened across both ACP
+/// dialects so the desktop sees one shape and every id it is offered is an id
+/// the `switch_model` path can resolve. Optional `providers` narrows the list to
+/// the given provider prefixes.
+///
+/// Read-only: no session is created and no agent state changes. An agent that
+/// has not created a session yet answers `not_populated` rather than an empty
+/// list, so the desktop can tell "nothing to offer" from "not known yet".
+fn handle_list_models_control(
+    payload: &serde_json::Value,
+    pool: &AgentPool,
+    observer: Option<&observer::ObserverHandle>,
+) {
+    let request_id = payload
+        .get("requestId")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_owned();
+    let channel_id = payload
+        .get("channelId")
+        .and_then(|value| value.as_str())
+        .and_then(|value| value.parse::<Uuid>().ok());
+    let providers: Vec<String> = payload
+        .get("providers")
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let (status, models, current_model, desired_model, total, truncated) =
+        match pool.model_catalog() {
+            // Same vocabulary as `switch_model` results, so the desktop learns
+            // one set of statuses for both frames.
+            pool::ModelCatalogLookup::NoIdleAgent => {
+                ("no_active_turn", Vec::new(), None, None, 0, false)
+            }
+            pool::ModelCatalogLookup::CatalogUnavailable => {
+                ("catalog_unavailable", Vec::new(), None, None, 0, false)
+            }
+            pool::ModelCatalogLookup::Available {
+                caps,
+                desired_model,
+            } => {
+                let (all, current) = acp::flatten_model_catalog(
+                    &caps.config_options_raw,
+                    caps.available_models_raw.as_ref(),
+                );
+                let filtered = acp::filter_models_by_provider(all, &providers);
+                // `total` counts the post-filter catalog: it is the number the
+                // desktop would show if nothing were truncated, which is what a
+                // "showing N of M" hint needs.
+                let total = filtered.len();
+                let (models, truncated) =
+                    acp::truncate_models_to_budget(filtered, LIST_MODELS_ARRAY_BUDGET);
+                if truncated {
+                    tracing::warn!(
+                        kept = models.len(),
+                        total,
+                        "list_models catalog exceeded the frame budget — sending a truncated list"
+                    );
+                }
+                (
+                    "ok",
+                    models,
+                    current,
+                    desired_model.map(str::to_owned),
+                    total,
+                    truncated,
+                )
+            }
+        };
+
+    if let Some(observer) = observer {
+        observer.emit(
+            "control_result",
+            None,
+            &observer::ObserverContext {
+                channel_id: channel_id.map(|id| id.to_string()),
+                session_id: None,
+                turn_id: None,
+                started_at: None,
+            },
+            serde_json::json!({
+                "type": "list_models",
+                "requestId": request_id,
+                "status": status,
+                "models": models,
+                "currentModelId": current_model,
+                "desiredModelId": desired_model,
+                "totalCount": total,
+                "truncated": truncated,
             }),
         );
     }

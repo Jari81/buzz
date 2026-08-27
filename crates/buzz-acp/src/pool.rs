@@ -1070,6 +1070,56 @@ impl AgentPool {
     }
 }
 
+/// Outcome of [`AgentPool::model_catalog`].
+pub enum ModelCatalogLookup<'a> {
+    /// A pooled agent has a populated catalog.
+    Available {
+        caps: &'a AgentModelCapabilities,
+        /// Runtime override in effect, if any — lets the desktop mark the
+        /// pending pick even before the switched session exists.
+        desired_model: Option<&'a str>,
+    },
+    /// An agent is pooled but has never created a session, so no catalog was
+    /// captured yet. Distinct from [`Self::NoIdleAgent`]: retrying after that
+    /// worker's first turn will succeed.
+    CatalogUnavailable,
+    /// No agent is currently in the pool — every slot is out on a turn, or the
+    /// pool is empty.
+    NoIdleAgent,
+}
+
+impl AgentPool {
+    /// Read the model catalog for a `list_models` control frame.
+    ///
+    /// Takes no channel: the catalog is a property of the agent *process*,
+    /// identical across its conversation scopes. This is the same assumption
+    /// [`Self::switch_idle_agent_model`] relies on when it validates a pick
+    /// against every worker before mutating any of them — so a caller with no
+    /// channel context gets the same list the switch path would honour.
+    ///
+    /// Reads the first pooled worker that has a catalog. Unlike the switch
+    /// path this does not fail closed on a checked-out slot: showing the list
+    /// from an available worker is strictly better than showing nothing, and
+    /// nothing is mutated here.
+    pub fn model_catalog(&self) -> ModelCatalogLookup<'_> {
+        let mut saw_agent = false;
+        for agent in self.agents.iter().flatten() {
+            saw_agent = true;
+            if let Some(caps) = agent.model_capabilities.as_ref() {
+                return ModelCatalogLookup::Available {
+                    caps,
+                    desired_model: agent.desired_model.as_deref(),
+                };
+            }
+        }
+        if saw_agent {
+            ModelCatalogLookup::CatalogUnavailable
+        } else {
+            ModelCatalogLookup::NoIdleAgent
+        }
+    }
+}
+
 /// Outcome of [`AgentPool::switch_idle_agent_model`].
 #[derive(Debug, PartialEq, Eq)]
 pub enum IdleSwitchResult {
@@ -4660,6 +4710,98 @@ mod tests {
             args: vec![],
             env: vec![],
         }
+    }
+
+    /// A pooled agent backed by a harmless long-lived subprocess. Enough for
+    /// the catalog lookup, which never talks to the agent.
+    async fn pooled_test_agent(
+        model_capabilities: Option<AgentModelCapabilities>,
+        desired_model: Option<String>,
+    ) -> OwnedAgent {
+        let acp = AcpClient::spawn(
+            "bash",
+            &["-c".to_string(), "sleep 10".to_string()],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn test agent");
+        OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities,
+            desired_model,
+            model_overridden: false,
+            agent_name: "unknown".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        }
+    }
+
+    #[test]
+    fn model_catalog_reports_no_agent_when_every_slot_is_checked_out() {
+        let pool = AgentPool::from_slots(vec![None]);
+        assert!(matches!(
+            pool.model_catalog(),
+            ModelCatalogLookup::NoIdleAgent
+        ));
+    }
+
+    #[tokio::test]
+    async fn model_catalog_distinguishes_not_populated_from_empty() {
+        // An agent that has never created a session has no catalog. This must
+        // NOT read as "this agent offers no models" — the desktop retries after
+        // the first turn instead of showing an empty picker.
+        let pool = AgentPool::from_slots(vec![Some(pooled_test_agent(None, None).await)]);
+        assert!(matches!(
+            pool.model_catalog(),
+            ModelCatalogLookup::CatalogUnavailable
+        ));
+    }
+
+    #[tokio::test]
+    async fn model_catalog_returns_cached_catalog_and_pending_override() {
+        let caps = AgentModelCapabilities {
+            config_options_raw: vec![json!({
+                "id": "model",
+                "category": "model",
+                "currentValue": "openai/gpt-5.6-terra",
+                "options": [{ "value": "openai/gpt-5.6-terra", "name": "Terra" }]
+            })],
+            available_models_raw: None,
+        };
+        let pool = AgentPool::from_slots(vec![Some(
+            pooled_test_agent(Some(caps), Some("alibaba-token-plan/qwen3.8-max".into())).await,
+        )]);
+        match pool.model_catalog() {
+            ModelCatalogLookup::Available {
+                caps,
+                desired_model,
+            } => {
+                assert_eq!(caps.config_options_raw.len(), 1);
+                assert_eq!(desired_model, Some("alibaba-token-plan/qwen3.8-max"));
+            }
+            _ => panic!("expected a populated catalog"),
+        }
+    }
+
+    #[tokio::test]
+    async fn model_catalog_reads_the_first_worker_that_has_one() {
+        // A worker still initializing must not mask a sibling that already
+        // captured the catalog — the list is process-level and identical.
+        let caps = AgentModelCapabilities {
+            config_options_raw: vec![json!({ "id": "model", "category": "model", "options": [] })],
+            available_models_raw: None,
+        };
+        let pool = AgentPool::from_slots(vec![
+            Some(pooled_test_agent(None, None).await),
+            Some(pooled_test_agent(Some(caps), None).await),
+        ]);
+        assert!(matches!(
+            pool.model_catalog(),
+            ModelCatalogLookup::Available { .. }
+        ));
     }
 
     #[test]
