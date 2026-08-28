@@ -262,7 +262,7 @@ impl SessionState {
     }
 
     /// Every conversation scope in `channel_id` this state holds an entry for.
-    fn scopes_for_channel(&self, channel_id: Uuid) -> HashSet<ConversationScope> {
+    pub(crate) fn scopes_for_channel(&self, channel_id: Uuid) -> HashSet<ConversationScope> {
         self.sessions
             .keys()
             .chain(self.turn_counts.keys())
@@ -425,6 +425,15 @@ impl PromptSource {
             PromptSource::Heartbeat => None,
         }
     }
+
+    /// The conversation root inside the channel; `None` for DMs (one
+    /// conversation per DM channel) and heartbeats.
+    pub fn thread_root(&self) -> Option<&str> {
+        match self {
+            PromptSource::Channel(scope) => scope.thread_root(),
+            PromptSource::Heartbeat => None,
+        }
+    }
 }
 
 /// Apply state effects for Race 1, where a control signal arrives just after the
@@ -436,8 +445,13 @@ fn apply_completed_before_control_signal(
     source: &PromptSource,
     control_signal: &ControlSignal,
 ) {
-    // Rotate invalidates so the next turn creates a fresh session.
-    if matches!(control_signal, ControlSignal::Rotate) {
+    // Rotate and SwitchModel both invalidate so the next turn creates a fresh
+    // session. For SwitchModel the signal arm has already set `desired_model`,
+    // so the fresh session applies the new model on its next creation.
+    if matches!(
+        control_signal,
+        ControlSignal::Rotate | ControlSignal::SwitchModel(_)
+    ) {
         state.invalidate(source);
     }
 }
@@ -460,6 +474,16 @@ pub enum ControlSignal {
     /// Stop the current turn and drop its triggering batch. The session is
     /// invalidated just like cancel; the next turn creates a fresh session.
     Rotate,
+    /// Switch the worker's model, then requeue the triggering batch so it
+    /// re-runs on a fresh session under the new model.
+    ///
+    /// The in-flight worker is checked out of the pool for the duration of its
+    /// turn, so the pool cannot set `desired_model` on it directly — this
+    /// signal is the only reachable lever. The model lands by setting
+    /// `OwnedAgent::desired_model` before invalidation; the requeued turn
+    /// re-creates the session and re-applies it. Runtime-only — never
+    /// persisted, gone on restart.
+    SwitchModel(String),
 }
 
 /// Goose-native non-cancelling steer request, sent from the main loop to an
@@ -1013,23 +1037,27 @@ impl AgentPool {
         count
     }
 
-    /// Complete-pool model switch: require every worker slot to be idle,
-    /// prevalidate every worker's cached catalog, then atomically update every
-    /// slot and invalidate target-channel sessions.
+    /// Set the model on every worker slot the pool currently holds.
     ///
-    /// The override lives on the worker process, not the conversation. Updating
-    /// only workers that currently hold a session for `channel_id` would leave
-    /// another idle worker able to claim the channel later under the old model.
-    /// Any checked-out/empty slot therefore fails closed before mutation.
-    pub fn switch_idle_agent_model(
-        &mut self,
-        channel_id: Uuid,
-        model_id: &str,
-    ) -> IdleSwitchResult {
-        if self.agents.is_empty() || self.agents.iter().any(Option::is_none) {
+    /// The override lives on the worker process, not the conversation: a worker
+    /// that is idle now may claim any conversation later, so every slot the
+    /// pool holds must agree. Checked-out (in-flight) workers are unreachable
+    /// from here — they own themselves for the duration of their turn. The
+    /// caller must cover them with [`ControlSignal::SwitchModel`] or refuse the
+    /// switch; see `handle_switch_model_control`.
+    ///
+    /// Validates every held slot's cached catalog before mutating any of them,
+    /// so a catalog disagreement fails closed instead of splitting the pool
+    /// across models. Invalidation is the caller's job: which conversation
+    /// should lose its session — and its context — is a policy decision, not a
+    /// property of the model switch.
+    pub fn set_model_on_held_slots(&mut self, model_id: &str) -> IdleSwitchResult {
+        let all_slots: Vec<usize> = (0..self.agents.len())
+            .filter(|&i| self.agents[i].is_some())
+            .collect();
+        if all_slots.is_empty() {
             return IdleSwitchResult::NoIdleAgent;
         }
-        let all_slots: Vec<usize> = (0..self.agents.len()).collect();
 
         // Validate every process before mutating any of them. A catalog
         // disagreement fails closed rather than leaving slots split.
@@ -1053,12 +1081,42 @@ impl AgentPool {
             if let Some(agent) = self.agents[index].as_mut() {
                 agent.desired_model = Some(model_id.to_string());
                 agent.model_overridden = true;
-                agent.state.invalidate_channel(channel_id);
             }
         }
         self.effective_model = Some(model_id.to_string());
         self.model_overridden = true;
         IdleSwitchResult::Switched
+    }
+
+    /// Every conversation this pool holds a session for in `channel_id`,
+    /// across all idle workers. Sorted and deduplicated.
+    pub fn conversation_scopes_for_channel(&self, channel_id: Uuid) -> Vec<ConversationScope> {
+        let mut scopes: Vec<ConversationScope> = self
+            .agents
+            .iter()
+            .flatten()
+            .flat_map(|agent| agent.state.scopes_for_channel(channel_id))
+            .collect();
+        scopes.sort();
+        scopes.dedup();
+        scopes
+    }
+
+    /// How many worker slots are checked out for a turn right now.
+    ///
+    /// A checked-out worker owns itself and cannot be reached by a pool-wide
+    /// model update; the count is what tells a caller whether it can still
+    /// guarantee that no worker keeps serving the old model.
+    pub fn checked_out_slot_count(&self) -> usize {
+        self.agents.iter().filter(|slot| slot.is_none()).count()
+    }
+
+    /// Every conversation currently running a turn, across all workers.
+    pub fn in_flight_scopes(&self) -> Vec<ConversationScope> {
+        self.task_map
+            .values()
+            .filter_map(|meta| meta.scope.clone())
+            .collect()
     }
 
     pub fn effective_model(&self) -> Option<&str> {
@@ -1123,7 +1181,7 @@ impl AgentPool {
 /// Outcome of [`AgentPool::switch_idle_agent_model`].
 #[derive(Debug, PartialEq, Eq)]
 pub enum IdleSwitchResult {
-    /// `desired_model` set and the channel's conversation sessions invalidated.
+    /// `desired_model` set on every held slot. Invalidation is the caller's.
     Switched,
     /// Desired model is not in the agent's cached catalog — pick rejected,
     /// session untouched.
@@ -1131,7 +1189,9 @@ pub enum IdleSwitchResult {
     /// At least one idle worker has not created a session yet, so its model
     /// catalog is not authoritative. Retry after that worker initializes.
     CatalogUnavailable,
-    /// No idle agent available (all checked out / none spawned).
+    /// The pool holds no slot to set the model on (all checked out / none
+    /// spawned). Not fatal on the busy path: the in-flight worker receives the
+    /// switch over its control channel instead.
     NoIdleAgent,
 }
 
@@ -1756,6 +1816,10 @@ pub async fn run_prompt_task(
     // channel, and a thread root is not a channel. Conversation identity is
     // carried separately where it is additive.
     let observer_channel_id = source.channel_id();
+    // Conversation identity for metric frames, additive next to the channel
+    // key. `None` for DMs and heartbeats — both have exactly one conversation
+    // per channel, so the channel id already identifies it.
+    let observer_thread_root: Option<String> = source.thread_root().map(str::to_string);
     let turn_started_at = chrono::Utc::now().to_rfc3339();
     agent.acp.set_observer_context(observer::context_for_turn(
         observer_channel_id,
@@ -2205,6 +2269,7 @@ pub async fn run_prompt_task(
                         &ctx,
                         usage,
                         Some(scope.channel_id()),
+                        scope.thread_root(),
                         &session_id,
                         &format!("{turn_id}:initial"),
                         Some(acp_stop_to_core(&stop_reason)),
@@ -2240,6 +2305,7 @@ pub async fn run_prompt_task(
                                 &ctx,
                                 usage,
                                 Some(scope.channel_id()),
+                                scope.thread_root(),
                                 &session_id,
                                 &format!("{turn_id}:initial"),
                                 Some(acp_stop_to_core(&stop_reason)),
@@ -2519,6 +2585,15 @@ pub async fn run_prompt_task(
                 ) => result,
                 mode = rx => {
                     let control_signal = mode.unwrap_or(ControlSignal::Cancel);
+                    // Land the model switch before any cancel/requeue work:
+                    // setting `desired_model` here means the fresh session
+                    // created by the requeued turn (busy) or the next turn
+                    // (already-completed) applies the new model. Runtime-only —
+                    // never persisted.
+                    if let ControlSignal::SwitchModel(ref model_id) = control_signal {
+                        agent.desired_model = Some(model_id.clone());
+                        agent.model_overridden = true;
+                    }
 
                     // Control signal received. Guard against Race 1: the turn may
                     // have completed naturally just as cancel fired.
@@ -2540,6 +2615,7 @@ pub async fn run_prompt_task(
                                     &ctx,
                                     usage,
                                     observer_channel_id,
+                                    observer_thread_root.as_deref(),
                                     &session_id,
                                     &turn_id,
                                     Some(buzz_core::agent_turn_metric::StopReason::Cancelled),
@@ -2576,6 +2652,7 @@ pub async fn run_prompt_task(
                                     &ctx,
                                     usage,
                                     observer_channel_id,
+                                    observer_thread_root.as_deref(),
                                     &session_id,
                                     &turn_id,
                                     Some(buzz_core::agent_turn_metric::StopReason::Error),
@@ -2607,7 +2684,10 @@ pub async fn run_prompt_task(
                         // and last_prompt_id was cleared by the success path.
                         //
                         // MUST send a PromptResult or the main loop deadlocks.
-                        if matches!(control_signal, ControlSignal::Rotate) {
+                        if matches!(
+                            control_signal,
+                            ControlSignal::Rotate | ControlSignal::SwitchModel(_)
+                        ) {
                             tracing::debug!(
                                 target: "pool::prompt",
                                 "rotate/switch signal arrived but turn already completed — invalidating session"
@@ -2636,6 +2716,7 @@ pub async fn run_prompt_task(
                             &ctx,
                             usage,
                             observer_channel_id,
+                            observer_thread_root.as_deref(),
                             &session_id,
                             &turn_id,
                             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
@@ -2709,6 +2790,7 @@ pub async fn run_prompt_task(
                 &ctx,
                 usage,
                 observer_channel_id,
+                observer_thread_root.as_deref(),
                 &session_id,
                 &turn_id,
                 Some(core_stop),
@@ -2732,6 +2814,7 @@ pub async fn run_prompt_task(
                 &ctx,
                 usage,
                 observer_channel_id,
+                observer_thread_root.as_deref(),
                 &session_id,
                 &turn_id,
                 Some(buzz_core::agent_turn_metric::StopReason::Error),
@@ -2764,6 +2847,7 @@ pub async fn run_prompt_task(
                         &ctx,
                         usage,
                         observer_channel_id,
+                        observer_thread_root.as_deref(),
                         &session_id,
                         &turn_id,
                         Some(buzz_core::agent_turn_metric::StopReason::Cancelled),
@@ -2792,6 +2876,7 @@ pub async fn run_prompt_task(
                         &ctx,
                         usage,
                         observer_channel_id,
+                        observer_thread_root.as_deref(),
                         &session_id,
                         &turn_id,
                         Some(buzz_core::agent_turn_metric::StopReason::Error),
@@ -2817,6 +2902,7 @@ pub async fn run_prompt_task(
                         &ctx,
                         usage,
                         observer_channel_id,
+                        observer_thread_root.as_deref(),
                         &session_id,
                         &turn_id,
                         Some(buzz_core::agent_turn_metric::StopReason::Error),
@@ -2846,6 +2932,7 @@ pub async fn run_prompt_task(
                 &ctx,
                 usage,
                 observer_channel_id,
+                observer_thread_root.as_deref(),
                 &session_id,
                 &turn_id,
                 Some(buzz_core::agent_turn_metric::StopReason::Error),
@@ -2873,6 +2960,7 @@ pub async fn run_prompt_task(
                 &ctx,
                 usage,
                 observer_channel_id,
+                observer_thread_root.as_deref(),
                 &session_id,
                 &turn_id,
                 Some(buzz_core::agent_turn_metric::StopReason::Error),
@@ -3988,7 +4076,7 @@ fn requeue_cancelled_batch(
 ) -> Option<FlushBatch> {
     let reason = match signal {
         ControlSignal::Steer => CancelReason::Steer,
-        ControlSignal::Interrupt => CancelReason::Interrupt,
+        ControlSignal::Interrupt | ControlSignal::SwitchModel(_) => CancelReason::Interrupt,
         // Cancel/Rotate discard the batch — no merged re-prompt.
         ControlSignal::Cancel | ControlSignal::Rotate => return None,
     };
@@ -4391,6 +4479,7 @@ async fn publish_agent_turn_metric(
     ctx: &PromptContext,
     usage: Option<crate::usage::TurnUsage>,
     channel_id: Option<uuid::Uuid>,
+    thread_root: Option<&str>,
     session_id: &str,
     turn_id: &str,
     stop_reason: Option<buzz_core::agent_turn_metric::StopReason>,
@@ -4409,6 +4498,7 @@ async fn publish_agent_turn_metric(
         harness: ctx.harness_name.clone(),
         model: usage.model.clone(),
         channel_id: channel_id.map(|id| id.to_string()),
+        thread_root: thread_root.map(str::to_string),
         session_id: Some(usage.session_id.clone()),
         turn_id: Some(turn_id.to_string()),
         turn_seq: Some(usage.turn_seq),
@@ -6837,6 +6927,24 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     }
 
     #[test]
+    fn test_switch_model_after_natural_completion_invalidates_only_that_conversation() {
+        let (mut s, ch_a, ch_b) = make_state();
+
+        // SwitchModel must invalidate just like Rotate, so the requeued turn
+        // re-creates a session that applies the new desired_model...
+        apply_completed_before_control_signal(
+            &mut s,
+            &PromptSource::Channel(ch_a.clone()),
+            &ControlSignal::SwitchModel("model-next".into()),
+        );
+
+        assert!(!s.has_conversation_state(&ch_a));
+        // ...while the sibling conversation keeps its session and turn count.
+        assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
+        assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
+    }
+
+    #[test]
     fn test_cancel_after_natural_completion_preserves_channel_state() {
         let (mut s, ch_a, ch_b) = make_state();
 
@@ -6998,6 +7106,12 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let cases = [
             (ControlSignal::Steer, Some(CancelReason::Steer)),
             (ControlSignal::Interrupt, Some(CancelReason::Interrupt)),
+            // A model switch must PRESERVE the batch: the work the user asked
+            // for has to resume on the new model, not be silently dropped.
+            (
+                ControlSignal::SwitchModel("model-next".into()),
+                Some(CancelReason::Interrupt),
+            ),
             (ControlSignal::Cancel, None),
             (ControlSignal::Rotate, None),
         ];
@@ -7648,6 +7762,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             &ctx,
             None,
             None,
+            None,
             "sess-1",
             "turn-1",
             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
@@ -7682,6 +7797,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         publish_agent_turn_metric(
             &ctx,
             Some(usage),
+            None,
             None,
             "sess-1",
             "turn-1",
@@ -7722,6 +7838,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             &ctx,
             Some(usage),
             Some(uuid::Uuid::new_v4()),
+            None,
             "sess-1",
             "turn-1",
             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
@@ -7762,6 +7879,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             &ctx,
             Some(usage),
             Some(uuid::Uuid::new_v4()),
+            None,
             "sess-cancel",
             "turn-cancel",
             Some(buzz_core::agent_turn_metric::StopReason::Cancelled),
@@ -7802,6 +7920,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             &ctx,
             Some(usage),
             Some(uuid::Uuid::new_v4()),
+            None,
             "sess-ba",
             "turn-ba",
             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
