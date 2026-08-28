@@ -1649,18 +1649,18 @@ fn format_context_hints(
             "[Context]\n\
              Scope: dm\n\
              Channel: {channel_display}\n\
-             {ctx_hint}"
+             {ctx_hint}\n\
+             Replies in this DM stay flat: send ordinary replies as plain messages without `--reply-to`."
         );
-        // If this is a DM reply, include thread structural info as supplementary.
+        // If this is a DM reply, include thread structural info so the agent
+        // can re-read the chain it was triggered from — but no reply anchor:
+        // ordinary DM replies never grow a reply thread.
         if let Some(ref root) = thread_tags.root_event_id {
             s.push_str(&format!("\nThread root: {root}"));
             if let Some(ref parent) = thread_tags.parent_event_id {
                 if parent != root {
                     s.push_str(&format!("\nParent: {parent}"));
                 }
-            }
-            if let Some(event_id) = reply_anchor {
-                append_reply_instruction(&mut s, event_id);
             }
         }
         s
@@ -1903,17 +1903,19 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
 
     // 2. Context hints (with a human-aware reply anchor).
     //
-    // Human-facing turns are anchored so replies stay readable at layer 1:
+    // Human-facing channel turns are anchored so replies stay readable at
+    // layer 1:
     //   - in a thread  → anchor to the thread ROOT (no depth-2 nesting)
     //   - top-level     → anchor to the triggering event (it becomes the root)
     // Agent↔agent turns get no forced anchor — deep nesting is intentional
-    // there. DMs are always 1:1 with a human, so they always anchor.
+    // there.
+    //
+    // DMs get no anchor at all: a DM is a flat 1:1 feed, and every anchored
+    // reply would collapse behind a "1 reply" disclosure in the client
+    // instead of staying inline. Ordinary DM replies are plain messages.
     let sender_pubkey = last_event.event.pubkey.to_hex();
     let reply_anchor = if is_dm {
-        thread_tags
-            .root_event_id
-            .is_some()
-            .then(|| last_event.event.id.to_hex())
+        None
     } else {
         resolve_reply_anchor(
             &sender_pubkey,
@@ -4658,12 +4660,12 @@ mod tests {
     }
 
     #[test]
-    fn test_reply_instruction_present_for_dm_thread_reply() {
+    fn test_reply_instruction_absent_for_dm_thread_reply_keeps_dm_flat() {
         let ch = conv();
         let root_id = "b".repeat(64);
         let event = make_event_with_tags(
             "thanks",
-            vec![vec!["e".into(), root_id, "".into(), "reply".into()]],
+            vec![vec!["e".into(), root_id.clone(), "".into(), "reply".into()]],
         );
         let event_id = event.id.to_hex();
         let batch = FlushBatch {
@@ -4690,9 +4692,26 @@ mod tests {
             },
         )
         .join("\n\n");
+        // A DM is a flat feed: no injected reply instruction, not even when
+        // the triggering message itself sits inside a reply chain. The flat
+        // rule line mentions `--reply-to` only to forbid it, so assert on the
+        // instruction marker instead of the bare flag.
         assert!(
-            prompt.contains(&format!("--reply-to {event_id}")),
-            "DM thread reply should include reply instruction"
+            !prompt.contains("IMPORTANT:"),
+            "DM reply must not inject a reply instruction: {prompt}"
+        );
+        assert!(
+            !prompt.contains(&format!("--reply-to {event_id}")),
+            "DM reply must not anchor to the triggering event"
+        );
+        assert!(
+            prompt.contains("Replies in this DM stay flat"),
+            "DM context should state the flat-reply rule: {prompt}"
+        );
+        // Thread structure stays visible for re-reading the chain.
+        assert!(
+            prompt.contains(&format!("Thread root: {root_id}")),
+            "DM reply context should still expose the thread root"
         );
     }
 
@@ -4754,9 +4773,15 @@ mod tests {
             },
         )
         .join("\n\n");
+        // The flat rule line mentions `--reply-to` only to forbid it; assert
+        // on the instruction marker instead of the bare flag.
         assert!(
-            !prompt.contains("--reply-to"),
-            "DM non-reply should NOT include reply instruction"
+            !prompt.contains("IMPORTANT:"),
+            "DM non-reply should NOT include a reply instruction"
+        );
+        assert!(
+            prompt.contains("Replies in this DM stay flat"),
+            "DM context should state the flat-reply rule: {prompt}"
         );
     }
 
