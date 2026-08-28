@@ -1459,14 +1459,21 @@ fn handle_list_models_control(
     }
 }
 
-/// Handle a `switch_model` control frame (Phase 3a, Option ii).
+/// Handle a `switch_model` control frame.
 ///
-/// Busy path: fail closed while any channel turn is in flight because a
-/// channel-level switch cannot atomically update checked-out and idle sibling
-/// slots. The desktop may retry when the channel is idle.
+/// The override is **agent-global**: it lands on every worker slot the pool
+/// holds plus the pool default, so the agent uses the new model everywhere.
+/// That is the shape the primary use case needs — escaping a rate-limited
+/// provider — and it is what buzz-acp can honestly deliver today, since
+/// `desired_model` lives on the worker process, not on the conversation.
 ///
-/// Idle path: validate every relevant slot's cached catalog before mutating
-/// any slot, then update all desired models and invalidate all channel sessions.
+/// What *is* conversation-scoped is the blast radius. Only the requesting
+/// conversation loses its session, so sibling threads in the same channel keep
+/// their context and pick the new model up when their own session is next
+/// created. Before BUZZ-ACP-024 this path called `invalidate_channel`, which
+/// dropped every thread session in the channel — harmless when a channel had
+/// exactly one session, destructive once BUZZ-ACP-019 gave every thread its
+/// own.
 fn handle_switch_model_control(
     payload: &serde_json::Value,
     pool: &mut AgentPool,
@@ -1484,28 +1491,78 @@ fn handle_switch_model_control(
         tracing::warn!("observer switch_model control frame missing modelId");
         return;
     };
+    let requested_root = payload
+        .get("conversationRoot")
+        .and_then(|value| value.as_str())
+        .filter(|root| root.len() == 64 && root.chars().all(|c| c.is_ascii_hexdigit()));
 
-    // A turn is in flight for this channel iff a task_map entry exists. The
-    // agent is moved out of the pool during a turn, so the control oneshot is
-    // the only reachable lever; an idle channel has no such entry.
-    let turn_in_flight = pool.task_map().values().any(|m| {
-        m.scope
-            .as_ref()
-            .is_some_and(|scope| scope.channel_id() == channel_id)
-    });
+    // Which conversation asked. Modern desktop frames name it. Legacy
+    // channel-only frames are accepted when the channel holds exactly one
+    // conversation — always true for a DM, and for a group channel whose only
+    // thread has a session. Anything else leaves the target unresolved: the
+    // model still lands globally, but no session is dropped, because guessing
+    // would cost an unrelated thread its context.
+    let target = match requested_root {
+        Some(root) => Some(ConversationScope::thread(channel_id, root)),
+        None => {
+            let mut scopes = pool.conversation_scopes_for_channel(channel_id);
+            if scopes.len() == 1 {
+                scopes.pop()
+            } else {
+                None
+            }
+        }
+    };
 
-    let status = if turn_in_flight {
-        // A channel-level switch cannot atomically update checked-out and idle
-        // sibling slots. Fail closed rather than splitting the channel across
-        // models; retry once every relevant slot is idle.
-        "in_flight_ambiguous"
+    let in_flight = pool.in_flight_scopes();
+    let target_in_flight = target
+        .as_ref()
+        .is_some_and(|scope| in_flight.contains(scope));
+    // A worker serving another conversation is checked out and unreachable: it
+    // would keep answering on the old model after the switch. Refuse rather
+    // than split the pool across models.
+    //
+    // Counted over checked-out slots rather than `task_map` scopes: the slot
+    // count is the property that actually matters — one unreachable worker is
+    // one worker too many — and it stays correct even if a slot is ever held
+    // without a matching task entry.
+    let reachable_checked_out = usize::from(target_in_flight);
+    let others_in_flight = pool.checked_out_slot_count() > reachable_checked_out;
+
+    let status = if others_in_flight {
+        "other_turns_in_flight"
     } else {
-        // Idle path: validate against the cached catalog before invalidating.
-        match pool.switch_idle_agent_model(channel_id, model_id) {
-            IdleSwitchResult::Switched => "switched",
+        match pool.set_model_on_held_slots(model_id) {
             IdleSwitchResult::UnsupportedModel => "unsupported_model",
             IdleSwitchResult::CatalogUnavailable => "catalog_unavailable",
-            IdleSwitchResult::NoIdleAgent => "no_active_turn",
+            IdleSwitchResult::Switched | IdleSwitchResult::NoIdleAgent => {
+                match (target_in_flight, target.as_ref()) {
+                    // Busy path: the worker owns itself for the duration of its
+                    // turn, so the control oneshot is the only reachable lever.
+                    // It lands the model, then cancels and requeues its batch so
+                    // the work resumes on the new model.
+                    (true, Some(scope)) => {
+                        if signal_in_flight_conversation(
+                            pool,
+                            scope,
+                            ControlSignal::SwitchModel(model_id.to_string()),
+                        ) {
+                            "sent"
+                        } else {
+                            // Oneshot already consumed this turn by a prior
+                            // cancel/interrupt — the turn is ending anyway.
+                            "turn_ending"
+                        }
+                    }
+                    (_, Some(scope)) => {
+                        pool.invalidate_conversation_sessions(scope);
+                        "switched"
+                    }
+                    // Model landed pool-wide; nothing to invalidate, either
+                    // because the target is unresolved or it has no session yet.
+                    (_, None) => "switched",
+                }
+            }
         }
     };
 
@@ -1523,6 +1580,7 @@ fn handle_switch_model_control(
                 "type": "switch_model",
                 "status": status,
                 "modelId": model_id,
+                "conversationRoot": target.as_ref().and_then(ConversationScope::thread_root),
             }),
         );
     }
@@ -7530,7 +7588,7 @@ mod error_outcome_emission_tests {
     }
 
     #[tokio::test]
-    async fn idle_channel_model_switch_updates_all_sibling_slots() {
+    async fn model_switch_updates_every_slot_without_dropping_sessions() {
         let channel_id = Uuid::new_v4();
         let scope_a = ConversationScope::thread(channel_id, "a".repeat(64));
         let scope_b = ConversationScope::thread(channel_id, "b".repeat(64));
@@ -7556,22 +7614,24 @@ mod error_outcome_emission_tests {
         let mut pool = AgentPool::from_slots(vec![Some(agent_a), Some(agent_b), Some(agent_c)]);
 
         assert_eq!(
-            pool.switch_idle_agent_model(channel_id, "model-next"),
+            pool.set_model_on_held_slots("model-next"),
             IdleSwitchResult::Switched
         );
         assert_eq!(pool.effective_model(), Some("model-next"));
         assert!(pool.model_overridden());
 
+        // BUZZ-ACP-024: the switch itself drops no session. Which conversation
+        // loses its context is the caller's decision, taken one scope at a time.
         let returned_a = pool
             .try_claim(Some(&scope_a))
             .expect("slot A remains available");
         assert_eq!(returned_a.desired_model.as_deref(), Some("model-next"));
-        assert!(!returned_a.state.sessions.contains_key(&scope_a));
+        assert!(returned_a.state.sessions.contains_key(&scope_a));
         let returned_b = pool
             .try_claim(Some(&scope_b))
             .expect("slot B remains available");
         assert_eq!(returned_b.desired_model.as_deref(), Some("model-next"));
-        assert!(!returned_b.state.sessions.contains_key(&scope_b));
+        assert!(returned_b.state.sessions.contains_key(&scope_b));
         let returned_c = pool
             .try_claim(Some(&unrelated_scope))
             .expect("unrelated idle slot remains available");
@@ -7583,16 +7643,169 @@ mod error_outcome_emission_tests {
         assert!(returned_c.state.sessions.contains_key(&unrelated_scope));
     }
 
+    /// BUZZ-ACP-024 regression guard. Before this fix the switch called
+    /// `invalidate_channel`, which dropped the session of every thread in the
+    /// channel. That was harmless while a channel had exactly one session and
+    /// destructive once BUZZ-ACP-019 gave every thread its own: switching the
+    /// model from one thread silently reset every sibling thread's context.
+    #[tokio::test]
+    async fn scoped_switch_preserves_sibling_thread_sessions() {
+        let channel_id = Uuid::new_v4();
+        let target = ConversationScope::thread(channel_id, "a".repeat(64));
+        let sibling = ConversationScope::thread(channel_id, "b".repeat(64));
+        let mut agent = dummy_agent(0).await;
+        allow_model(&mut agent, "model-next");
+        agent
+            .state
+            .sessions
+            .insert(target.clone(), "session-target".into());
+        agent
+            .state
+            .sessions
+            .insert(sibling.clone(), "session-sibling".into());
+        let mut pool = AgentPool::from_slots(vec![Some(agent)]);
+
+        assert_eq!(
+            pool.set_model_on_held_slots("model-next"),
+            IdleSwitchResult::Switched
+        );
+        assert_eq!(pool.invalidate_conversation_sessions(&target), 1);
+
+        let returned = pool
+            .try_claim(Some(&target))
+            .expect("slot remains available");
+        assert_eq!(returned.desired_model.as_deref(), Some("model-next"));
+        assert!(
+            !returned.state.sessions.contains_key(&target),
+            "the requesting conversation must lose its session so the switch takes effect"
+        );
+        assert_eq!(
+            returned.state.sessions.get(&sibling).map(String::as_str),
+            Some("session-sibling"),
+            "a sibling thread must keep its session — and its context"
+        );
+    }
+
+    /// End-to-end at the handler, which is where the regression actually lived:
+    /// a `switch_model` frame naming one thread must not disturb its siblings.
+    #[tokio::test]
+    async fn switch_model_frame_spares_sibling_thread_sessions() {
+        let channel_id = Uuid::new_v4();
+        let target_root = "a".repeat(64);
+        let target = ConversationScope::thread(channel_id, &target_root);
+        let sibling = ConversationScope::thread(channel_id, "b".repeat(64));
+        let mut agent = dummy_agent(0).await;
+        allow_model(&mut agent, "model-next");
+        agent
+            .state
+            .sessions
+            .insert(target.clone(), "session-target".into());
+        agent
+            .state
+            .sessions
+            .insert(sibling.clone(), "session-sibling".into());
+        let mut pool = AgentPool::from_slots(vec![Some(agent)]);
+
+        handle_switch_model_control(
+            &serde_json::json!({
+                "channelId": channel_id.to_string(),
+                "modelId": "model-next",
+                "conversationRoot": target_root,
+            }),
+            &mut pool,
+            None,
+        );
+
+        assert_eq!(pool.effective_model(), Some("model-next"));
+        let returned = pool.try_claim(Some(&target)).expect("slot available");
+        assert_eq!(returned.desired_model.as_deref(), Some("model-next"));
+        assert!(!returned.state.sessions.contains_key(&target));
+        assert_eq!(
+            returned.state.sessions.get(&sibling).map(String::as_str),
+            Some("session-sibling"),
+            "sibling thread must survive a switch aimed at another thread"
+        );
+    }
+
+    /// An unknown model must be rejected before anything is mutated — the
+    /// desktop picker relies on this to report a bad pick instead of silently
+    /// resetting the conversation.
+    #[tokio::test]
+    async fn switch_model_frame_rejects_unknown_model_without_side_effects() {
+        let channel_id = Uuid::new_v4();
+        let target_root = "a".repeat(64);
+        let target = ConversationScope::thread(channel_id, &target_root);
+        let mut agent = dummy_agent(0).await;
+        allow_model(&mut agent, "model-known");
+        agent
+            .state
+            .sessions
+            .insert(target.clone(), "session-target".into());
+        let mut pool = AgentPool::from_slots(vec![Some(agent)]);
+
+        handle_switch_model_control(
+            &serde_json::json!({
+                "channelId": channel_id.to_string(),
+                "modelId": "model-missing",
+                "conversationRoot": target_root,
+            }),
+            &mut pool,
+            None,
+        );
+
+        assert_eq!(pool.effective_model(), None);
+        let returned = pool.try_claim(Some(&target)).expect("slot available");
+        assert!(returned.desired_model.is_none());
+        assert_eq!(
+            returned.state.sessions.get(&target).map(String::as_str),
+            Some("session-target"),
+            "a rejected pick must leave the session untouched"
+        );
+    }
+
+    /// Legacy desktop frames carry no `conversationRoot`. The handler may only
+    /// infer the target when the channel holds exactly one conversation;
+    /// otherwise it must leave sessions alone rather than guess.
+    #[tokio::test]
+    async fn channel_scope_resolution_distinguishes_single_from_ambiguous() {
+        let channel_id = Uuid::new_v4();
+        let only = ConversationScope::thread(channel_id, "a".repeat(64));
+        let sibling = ConversationScope::thread(channel_id, "b".repeat(64));
+        let other_channel = ConversationScope::thread(Uuid::new_v4(), "c".repeat(64));
+
+        let mut agent = dummy_agent(0).await;
+        agent.state.sessions.insert(only.clone(), "s-a".into());
+        agent
+            .state
+            .sessions
+            .insert(other_channel.clone(), "s-c".into());
+        let pool = AgentPool::from_slots(vec![Some(agent)]);
+        assert_eq!(
+            pool.conversation_scopes_for_channel(channel_id),
+            vec![only.clone()],
+            "one conversation in the channel resolves unambiguously"
+        );
+
+        let mut agent = dummy_agent(0).await;
+        agent.state.sessions.insert(only.clone(), "s-a".into());
+        agent.state.sessions.insert(sibling.clone(), "s-b".into());
+        let pool = AgentPool::from_slots(vec![Some(agent)]);
+        assert_eq!(
+            pool.conversation_scopes_for_channel(channel_id).len(),
+            2,
+            "two conversations must read as ambiguous, not as a target to guess"
+        );
+    }
+
     #[tokio::test]
     async fn channel_model_switch_fails_atomically_when_any_catalog_is_unknown() {
-        let channel_id = Uuid::new_v4();
         let mut known = dummy_agent(0).await;
         let unknown = dummy_agent(1).await;
         allow_model(&mut known, "model-next");
         let mut pool = AgentPool::from_slots(vec![Some(known), Some(unknown)]);
 
         assert_eq!(
-            pool.switch_idle_agent_model(channel_id, "model-next"),
+            pool.set_model_on_held_slots("model-next"),
             IdleSwitchResult::CatalogUnavailable
         );
         for agent in pool.agents_mut().iter().flatten() {
@@ -7605,7 +7818,6 @@ mod error_outcome_emission_tests {
 
     #[tokio::test]
     async fn channel_model_switch_reports_unsupported_for_known_missing_model() {
-        let channel_id = Uuid::new_v4();
         let mut first = dummy_agent(0).await;
         let mut second = dummy_agent(1).await;
         allow_model(&mut first, "model-known");
@@ -7613,7 +7825,7 @@ mod error_outcome_emission_tests {
         let mut pool = AgentPool::from_slots(vec![Some(first), Some(second)]);
 
         assert_eq!(
-            pool.switch_idle_agent_model(channel_id, "model-missing"),
+            pool.set_model_on_held_slots("model-missing"),
             IdleSwitchResult::UnsupportedModel
         );
         for agent in pool.agents_mut().iter().flatten() {
@@ -7623,7 +7835,7 @@ mod error_outcome_emission_tests {
     }
 
     #[tokio::test]
-    async fn channel_model_switch_fails_atomically_when_unrelated_slot_is_checked_out() {
+    async fn checked_out_slot_is_visible_so_the_switch_can_fail_closed() {
         let channel_id = Uuid::new_v4();
         let scope_a = ConversationScope::thread(channel_id, "a".repeat(64));
         let scope_b = ConversationScope::thread(channel_id, "b".repeat(64));
@@ -7648,10 +7860,14 @@ mod error_outcome_emission_tests {
             .try_claim(Some(&unrelated_scope))
             .expect("unrelated slot checks out");
 
-        assert_ne!(
-            pool.switch_idle_agent_model(channel_id, "model-next"),
-            IdleSwitchResult::Switched,
-            "any checked-out slot must make the complete-pool update fail closed"
+        // BUZZ-ACP-024: the fail-closed decision moved out of the pool and into
+        // `handle_switch_model_control`, which refuses while any worker it
+        // cannot reach is checked out. The pool exposes the count that decision
+        // rests on; an unreachable worker would keep serving the old model.
+        assert_eq!(
+            pool.checked_out_slot_count(),
+            1,
+            "an unreachable worker must be visible to the caller"
         );
 
         let returned_a = pool.try_claim(Some(&scope_a)).expect("slot A unchanged");

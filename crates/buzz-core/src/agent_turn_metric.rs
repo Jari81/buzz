@@ -120,6 +120,16 @@ pub struct AgentTurnMetricPayload {
     /// Channel UUID the turn served, encrypted inside the payload.
     pub channel_id: Option<String>,
 
+    /// NIP-10 root event id of the conversation (thread) inside `channel_id`,
+    /// lowercase hex.
+    ///
+    /// Absent for DM channels and heartbeat turns — both have exactly one
+    /// conversation per channel, so `channel_id` already identifies it.
+    /// Additive: events published before this field existed, and consumers
+    /// that do not know it, fall back to channel-level attribution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_root: Option<String>,
+
     /// Session identifier. REQUIRED when `cumulative` is present.
     pub session_id: Option<String>,
 
@@ -233,6 +243,7 @@ mod tests {
             harness: "goose".to_string(),
             model: Some("claude-sonnet-4-5".to_string()),
             channel_id: Some("12345678-1234-1234-1234-123456789abc".to_string()),
+            thread_root: None,
             session_id: Some("sess-abc".to_string()),
             turn_id: Some("turn-1".to_string()),
             turn_seq: Some(1),
@@ -381,11 +392,49 @@ mod tests {
 
     // ── validate() — negative / non-finite costUsd ─────────────────────────
 
+    /// The thread root is additive: omitted on the wire when absent, so DM and
+    /// heartbeat payloads are byte-identical to what they were before the field
+    /// existed, and events published before it deserialize unchanged.
+    #[test]
+    fn thread_root_is_omitted_when_absent_and_optional_when_reading() {
+        let payload = sample_payload();
+        assert!(payload.thread_root.is_none());
+        let json = serde_json::to_value(&payload).expect("serialize");
+        assert!(
+            json.get("threadRoot").is_none(),
+            "absent thread root must not appear on the wire"
+        );
+
+        // A payload published before the field existed still reads.
+        let restored: AgentTurnMetricPayload = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(restored.thread_root, None);
+        assert_eq!(restored, payload);
+    }
+
+    /// A group-channel turn carries the conversation root, so a consumer can
+    /// attribute usage to one thread instead of folding a whole channel.
+    #[test]
+    fn thread_root_round_trips_for_a_thread_scoped_turn() {
+        let root = "a".repeat(64);
+        let payload = AgentTurnMetricPayload {
+            thread_root: Some(root.clone()),
+            ..sample_payload()
+        };
+        let json = serde_json::to_value(&payload).expect("serialize");
+        assert_eq!(
+            json.get("threadRoot").and_then(|v| v.as_str()),
+            Some(root.as_str())
+        );
+        let restored: AgentTurnMetricPayload = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(restored.thread_root.as_deref(), Some(root.as_str()));
+    }
+
     fn make_payload_with_turn_cost(cost: Option<f64>) -> AgentTurnMetricPayload {
         AgentTurnMetricPayload {
             harness: "test".to_string(),
             model: None,
             channel_id: None,
+            thread_root: None,
             session_id: None,
             turn_id: None,
             turn_seq: None,
@@ -410,6 +459,7 @@ mod tests {
             harness: "test".to_string(),
             model: None,
             channel_id: None,
+            thread_root: None,
             session_id: None,
             turn_id: None,
             turn_seq: None,
