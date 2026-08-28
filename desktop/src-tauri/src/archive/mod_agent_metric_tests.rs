@@ -19,6 +19,7 @@ fn make_turn_metric_event(owner_keys: &Keys, agent_keys: &Keys) -> Event {
         harness: "test-harness".to_string(),
         model: Some("test-model".to_string()),
         channel_id: None,
+        thread_root: None,
         session_id: Some("sess-1".to_string()),
         turn_id: Some("turn-1".to_string()),
         turn_seq: Some(1),

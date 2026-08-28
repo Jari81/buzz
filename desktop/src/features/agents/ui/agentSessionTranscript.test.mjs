@@ -63,6 +63,20 @@ test("buildTranscript drops a session/prompt turn whose frame was stubbed by the
   assert.deepEqual(buildTranscript([stubbed]), []);
 });
 
+test("buildTranscript propagates conversation identity to transcript items", () => {
+  const [item] = buildTranscript([
+    {
+      ...baseEvent,
+      kind: "turn_started",
+      conversationRoot: "thread-root-1",
+      payload: null,
+    },
+  ]);
+
+  assert.equal(item.channelId, baseEvent.channelId);
+  assert.equal(item.conversationRoot, "thread-root-1");
+});
+
 // --- positive control: a well-formed multi-block prompt DOES render ---
 
 test("buildTranscript renders Prompt context + user message for a multi-block session/prompt frame", () => {

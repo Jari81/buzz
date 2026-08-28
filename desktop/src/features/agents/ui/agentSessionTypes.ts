@@ -6,6 +6,8 @@ export type ObserverEvent = {
   kind: string;
   agentIndex: number | null;
   channelId: string | null;
+  /** Thread/conversation root inside channelId; absent for DMs and legacy frames. */
+  conversationRoot?: string | null;
   sessionId: string | null;
   turnId: string | null;
   startedAt?: string | null;
@@ -66,6 +68,8 @@ export type TranscriptItemIdentity = {
   turnId?: string | null;
   sessionId?: string | null;
   channelId?: string | null;
+  /** Thread identity; null/absent denotes legacy channel-scoped activity. */
+  conversationRoot?: string | null;
 };
 
 export type TranscriptItem =

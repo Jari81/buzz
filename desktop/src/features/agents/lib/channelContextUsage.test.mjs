@@ -12,7 +12,12 @@ function metric(channelId, overrides = {}) {
     turnId: "turn-1",
     turnSeq: 1,
     timestamp: "2026-08-20T18:00:00.000Z",
-    turn: { inputTokens: 60_000, outputTokens: 500, totalTokens: 60_500, costUsd: null },
+    turn: {
+      inputTokens: 60_000,
+      outputTokens: 500,
+      totalTokens: 60_500,
+      costUsd: null,
+    },
     cumulative: null,
     deltaReliable: true,
     stopReason: "end_turn",
@@ -20,11 +25,60 @@ function metric(channelId, overrides = {}) {
   };
 }
 
+test("foldChannelTurnMetrics scopes a thread and retains legacy fallback", () => {
+  const rows = [
+    metric("group-uuid", {
+      threadRoot: "thread-a",
+      turn: {
+        inputTokens: 80_000,
+        outputTokens: 1,
+        totalTokens: 1,
+        costUsd: null,
+      },
+    }),
+    metric("group-uuid", {
+      threadRoot: "thread-b",
+      turn: {
+        inputTokens: 20_000,
+        outputTokens: 1,
+        totalTokens: 1,
+        costUsd: null,
+      },
+    }),
+    metric("group-uuid", {
+      turn: {
+        inputTokens: 40_000,
+        outputTokens: 1,
+        totalTokens: 1,
+        costUsd: null,
+      },
+    }),
+  ];
+
+  const usage = foldChannelTurnMetrics("group-uuid", rows, "thread-a");
+  assert.equal(usage.reportCount, 2);
+  assert.equal(usage.lastInputTokens, 80_000);
+});
+
 test("foldChannelTurnMetrics attributes metrics by channelId", () => {
   const rows = [
-    metric("dm-uuid", { turn: { inputTokens: 80_000, outputTokens: 1, totalTokens: 1, costUsd: null } }),
+    metric("dm-uuid", {
+      turn: {
+        inputTokens: 80_000,
+        outputTokens: 1,
+        totalTokens: 1,
+        costUsd: null,
+      },
+    }),
     metric("other-channel"),
-    metric("dm-uuid", { turn: { inputTokens: 40_000, outputTokens: 1, totalTokens: 1, costUsd: null } }),
+    metric("dm-uuid", {
+      turn: {
+        inputTokens: 40_000,
+        outputTokens: 1,
+        totalTokens: 1,
+        costUsd: null,
+      },
+    }),
   ];
   const usage = foldChannelTurnMetrics("dm-uuid", rows);
   assert.equal(usage.reportCount, 2);

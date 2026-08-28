@@ -71,18 +71,6 @@ pub struct ProjectPullRequestStatusInput {
     created_at: u64,
 }
 
-/// Repository-scoped metadata for an agent-signed issue lifecycle status.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectIssueStatusInput {
-    target_owner: String,
-    repo_address: String,
-    issue_id: String,
-    issue_author: String,
-    status: String,
-    created_at: u64,
-}
-
 /// A previously signed merged-status event that needs publishing again.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -325,55 +313,6 @@ fn build_pull_request_status_event(
         .map_err(|error| format!("sign pull request status: {error}"))
 }
 
-/// Build a NIP-34 issue status event (kinds 1630/1631/1632/1633).
-///
-/// Same shape as `buzz issues status` and the desktop's own
-/// `buildGitStatusTags`: root `e` tag, repo `a` tag, and `p` tags for the repo
-/// owner plus the issue author. The `a` tag is load-bearing — the desktop
-/// reads status events with an `#a` filter, so an event without it is
-/// invisible to every client and the issue silently falls back to Backlog.
-fn build_issue_status_event(
-    keys: &Keys,
-    repo_address: &str,
-    issue_id: &str,
-    issue_author: &str,
-    status: &str,
-    created_at: u64,
-) -> Result<String, String> {
-    let owner = keys.public_key().to_hex();
-    validate_repo_address(repo_address, &owner)?;
-    let issue_id =
-        normalize_event_id(issue_id).ok_or_else(|| "Invalid issue event ID.".to_string())?;
-    let issue_author =
-        normalize_event_id(issue_author).ok_or_else(|| "Invalid issue author.".to_string())?;
-    let kind = match status {
-        "open" => Kind::Custom(1630),
-        "resolved" => Kind::Custom(1631),
-        "closed" => Kind::Custom(1632),
-        "draft" => Kind::Custom(1633),
-        _ => return Err("Invalid issue lifecycle status.".to_string()),
-    };
-    let mut raw_tags = vec![
-        vec!["e", issue_id.as_str(), "", "root"],
-        vec!["a", repo_address],
-        vec!["p", owner.as_str()],
-    ];
-    if issue_author != owner {
-        raw_tags.push(vec!["p", issue_author.as_str()]);
-    }
-    let tags = raw_tags
-        .into_iter()
-        .map(Tag::parse)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("build issue status tags: {error}"))?;
-    EventBuilder::new(kind, "")
-        .tags(tags)
-        .custom_created_at(Timestamp::from(created_at.max(Timestamp::now().as_secs())))
-        .sign_with_keys(keys)
-        .map(|event| event.as_json())
-        .map_err(|error| format!("sign issue status: {error}"))
-}
-
 fn same_repository(left: &str, right: &str) -> bool {
     left.trim()
         .trim_end_matches('/')
@@ -521,36 +460,6 @@ pub async fn sign_project_pull_request_status(
         input.created_at,
     )?)
     .map_err(|error| format!("parse signed pull request status: {error}"))?;
-    submit_signed_event_with_keys(&event, &state, &identity.keys, identity.auth_tag.as_deref())
-        .await?;
-    Ok(())
-}
-
-/// Sign and submit an issue lifecycle status as the repository owner.
-///
-/// Mirrors [`sign_project_pull_request_status`]: used when the repo owner is a
-/// managed agent, so the signed-in human owner cannot sign the status with
-/// their own key and still have it accepted by NIP-34 authorization.
-#[tauri::command]
-pub async fn sign_project_issue_status(
-    input: ProjectIssueStatusInput,
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    let target_owner = input.target_owner.trim().to_ascii_lowercase();
-    if normalize_event_id(&target_owner).is_none() {
-        return Err("Invalid target repository owner.".to_string());
-    }
-    let identity = project_owner_identity(&app, &state, &target_owner)?;
-    let event = Event::from_json(build_issue_status_event(
-        &identity.keys,
-        &input.repo_address,
-        &input.issue_id,
-        &input.issue_author,
-        &input.status,
-        input.created_at,
-    )?)
-    .map_err(|error| format!("parse signed issue status: {error}"))?;
     submit_signed_event_with_keys(&event, &state, &identity.keys, identity.auth_tag.as_deref())
         .await?;
     Ok(())
@@ -762,10 +671,9 @@ pub async fn merge_project_pull_request(
 #[cfg(test)]
 mod tests {
     use super::{
-        align_unborn_head_branch, build_issue_status_event, build_merged_status_event,
-        build_pull_request_status_event, normalize_commit, same_repository,
-        validate_merge_status_metadata, validate_project_owner_announcement,
-        ProjectOwnerAnnouncementInput,
+        align_unborn_head_branch, build_merged_status_event, build_pull_request_status_event,
+        normalize_commit, same_repository, validate_merge_status_metadata,
+        validate_project_owner_announcement, ProjectOwnerAnnouncementInput,
     };
     use crate::commands::project_git_exec::{build_test_git_auth_config, run_git};
     use nostr::{Event, JsonUtil, Keys, Timestamp};
@@ -983,99 +891,6 @@ mod tests {
             &"d".repeat(64),
             &"b".repeat(64),
             "merged",
-            Timestamp::now().as_secs(),
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn issue_status_carries_repo_coordinate_and_recipients() {
-        let keys = Keys::generate();
-        let owner = keys.public_key().to_hex();
-        let repo_address = format!("30617:{owner}:buzz");
-        let author = "b".repeat(64);
-        let event = Event::from_json(
-            build_issue_status_event(
-                &keys,
-                &repo_address,
-                &"d".repeat(64),
-                &author,
-                "resolved",
-                Timestamp::now().as_secs(),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-
-        assert_eq!(event.pubkey, keys.public_key());
-        assert_eq!(event.kind.as_u16(), 1631);
-        // Without the `a` tag the desktop's `#a` status filter never sees the
-        // event and the issue falls back to Backlog.
-        assert!(event
-            .tags
-            .iter()
-            .any(|tag| tag.as_slice() == ["a", repo_address.as_str()]));
-        // The issue author is notified. The owner's own `p` tag is dropped by
-        // `EventBuilder::build`, which strips self-tags unless
-        // `allow_self_tagging` is set — the signer needs no notification.
-        assert!(event
-            .tags
-            .iter()
-            .any(|tag| tag.as_slice() == ["p", author.as_str()]));
-        assert!(!event
-            .tags
-            .iter()
-            .any(|tag| tag.as_slice() == ["p", owner.as_str()]));
-        assert!(event.verify().is_ok());
-    }
-
-    #[test]
-    fn issue_status_maps_each_lifecycle_state_to_its_kind() {
-        let keys = Keys::generate();
-        let owner = keys.public_key().to_hex();
-        let repo_address = format!("30617:{owner}:buzz");
-        for (status, kind) in [
-            ("open", 1630u16),
-            ("resolved", 1631),
-            ("closed", 1632),
-            ("draft", 1633),
-        ] {
-            let event = Event::from_json(
-                build_issue_status_event(
-                    &keys,
-                    &repo_address,
-                    &"d".repeat(64),
-                    &"b".repeat(64),
-                    status,
-                    Timestamp::now().as_secs(),
-                )
-                .unwrap(),
-            )
-            .unwrap();
-            assert_eq!(event.kind.as_u16(), kind, "status {status}");
-        }
-    }
-
-    #[test]
-    fn issue_status_rejects_unknown_state_and_foreign_repo() {
-        let keys = Keys::generate();
-        let owner = keys.public_key().to_hex();
-
-        assert!(build_issue_status_event(
-            &keys,
-            &format!("30617:{owner}:buzz"),
-            &"d".repeat(64),
-            &"b".repeat(64),
-            "in-progress",
-            Timestamp::now().as_secs(),
-        )
-        .is_err());
-        assert!(build_issue_status_event(
-            &keys,
-            &format!("30617:{}:buzz", "a".repeat(64)),
-            &"d".repeat(64),
-            &"b".repeat(64),
-            "closed",
             Timestamp::now().as_secs(),
         )
         .is_err());

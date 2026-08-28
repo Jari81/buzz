@@ -12,20 +12,76 @@ export async function cancelManagedAgentTurn(
   return { status: "sent" };
 }
 
+export function buildListModelsControl(requestId: string) {
+  return {
+    type: "list_models" as const,
+    requestId,
+  };
+}
+
+export type SwitchModelTarget = {
+  channelId: string;
+  conversationRoot?: string | null;
+};
+
+type ObserverControlSender = (
+  pubkey: string,
+  payload: unknown,
+) => Promise<void>;
+
+export function buildSwitchModelControl(
+  targets: readonly SwitchModelTarget[],
+  modelId: string,
+  requestId: string,
+) {
+  return {
+    type: "switch_model" as const,
+    modelId,
+    requestId,
+    targets: targets.map(({ channelId, conversationRoot }) => ({
+      channelId,
+      ...(conversationRoot ? { conversationRoot } : {}),
+    })),
+  };
+}
+
+/** Send exactly one atomic model-switch control frame. */
+export async function sendSwitchModelControl(
+  sendControl: ObserverControlSender,
+  pubkey: string,
+  targets: readonly SwitchModelTarget[],
+  modelId: string,
+  requestId: string,
+): Promise<void> {
+  await sendControl(
+    pubkey,
+    buildSwitchModelControl(targets, modelId, requestId),
+  );
+}
+
+export async function listManagedAgentModels(
+  pubkey: string,
+  requestId: string,
+): Promise<void> {
+  await sendAgentObserverControl(pubkey, buildListModelsControl(requestId));
+}
+
 /**
- * Send a live model-switch control frame to a running agent. The switch rides
- * the harness's cancel-switch-requeue path (busy turn) or invalidate-and-reapply
- * (idle); the outcome arrives asynchronously as a `control_result` observer
- * frame, not as the return value here. This is fire-and-forget on the send side.
+ * Send one live model-switch control frame for all named conversations. The
+ * outcome arrives asynchronously as one aggregate `control_result` observer
+ * frame, not as the return value here.
  */
 export async function switchManagedAgentModel(
   pubkey: string,
-  channelId: string,
+  targets: readonly SwitchModelTarget[],
   modelId: string,
+  requestId: string,
 ): Promise<void> {
-  await sendAgentObserverControl(pubkey, {
-    type: "switch_model",
-    channelId,
+  await sendSwitchModelControl(
+    sendAgentObserverControl,
+    pubkey,
+    targets,
     modelId,
-  });
+    requestId,
+  );
 }

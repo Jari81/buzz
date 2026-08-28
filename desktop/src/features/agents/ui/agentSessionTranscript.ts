@@ -279,6 +279,7 @@ function rawPayloadTitle(payload: unknown) {
 
 type TranscriptItemContext = {
   channelId: string | null;
+  conversationRoot: string | null;
   turnId: string | null;
   sessionId: string | null;
 };
@@ -304,6 +305,7 @@ function upsertMessage(
         ...existing,
         text: existing.text + text,
         channelId: ctx.channelId,
+        conversationRoot: ctx.conversationRoot ?? existing.conversationRoot,
         turnId: ctx.turnId ?? existing.turnId,
         sessionId: ctx.sessionId ?? existing.sessionId,
         authorPubkey: authorPubkey ?? existing.authorPubkey,
@@ -325,9 +327,7 @@ function upsertMessage(
     text,
     timestamp,
     messageId,
-    channelId: ctx.channelId,
-    turnId: ctx.turnId,
-    sessionId: ctx.sessionId,
+    ...ctx,
     authorPubkey,
     acpSource,
   });
@@ -354,6 +354,7 @@ function upsertTextItem(
           ? joinLifecycleText(existing.text, text)
           : existing.text + text,
       channelId: ctx.channelId,
+      conversationRoot: ctx.conversationRoot ?? existing.conversationRoot,
       turnId: ctx.turnId ?? existing.turnId,
       sessionId: ctx.sessionId ?? existing.sessionId,
       acpSource: acpSource ?? existing.acpSource,
@@ -370,6 +371,7 @@ function upsertTextItem(
       text,
       timestamp,
       channelId: ctx.channelId,
+      conversationRoot: ctx.conversationRoot,
       turnId: ctx.turnId,
       sessionId: ctx.sessionId,
       acpSource,
@@ -418,6 +420,7 @@ function upsertLifecycleItem(
       text: joinLifecycleText(existing.text, text),
       descriptor: descriptor ?? existing.descriptor,
       channelId: ctx.channelId,
+      conversationRoot: ctx.conversationRoot ?? existing.conversationRoot,
       turnId: ctx.turnId ?? existing.turnId,
       sessionId: ctx.sessionId ?? existing.sessionId,
       acpSource: acpSource ?? existing.acpSource,
@@ -434,9 +437,7 @@ function upsertLifecycleItem(
     text,
     timestamp,
     descriptor,
-    channelId: ctx.channelId,
-    turnId: ctx.turnId,
-    sessionId: ctx.sessionId,
+    ...ctx,
     acpSource,
   });
 }
@@ -465,6 +466,7 @@ function replaceLifecycleItem(
       title,
       text,
       channelId: ctx.channelId,
+      conversationRoot: ctx.conversationRoot ?? existing.conversationRoot,
       turnId: ctx.turnId ?? existing.turnId,
       sessionId: ctx.sessionId ?? existing.sessionId,
       acpSource: acpSource ?? existing.acpSource,
@@ -480,9 +482,7 @@ function replaceLifecycleItem(
     title,
     text,
     timestamp,
-    channelId: ctx.channelId,
-    turnId: ctx.turnId,
-    sessionId: ctx.sessionId,
+    ...ctx,
     acpSource,
   });
 }
@@ -504,6 +504,7 @@ function upsertPlan(
       ...existing,
       text,
       channelId: ctx.channelId,
+      conversationRoot: ctx.conversationRoot ?? existing.conversationRoot,
       turnId: ctx.turnId ?? existing.turnId,
       sessionId: ctx.sessionId ?? existing.sessionId,
       acpSource: acpSource ?? existing.acpSource,
@@ -519,6 +520,7 @@ function upsertPlan(
         isUpdate: true,
         targetId: id,
         channelId: ctx.channelId,
+        conversationRoot: ctx.conversationRoot,
         turnId: ctx.turnId,
         sessionId: ctx.sessionId,
         acpSource,
@@ -534,9 +536,7 @@ function upsertPlan(
     title,
     text,
     timestamp,
-    channelId: ctx.channelId,
-    turnId: ctx.turnId,
-    sessionId: ctx.sessionId,
+    ...ctx,
     acpSource,
   });
 }
@@ -571,6 +571,7 @@ function upsertMetadata(
       ...existing,
       sections,
       channelId: ctx.channelId,
+      conversationRoot: ctx.conversationRoot ?? existing.conversationRoot,
       turnId: ctx.turnId ?? existing.turnId,
       sessionId: ctx.sessionId ?? existing.sessionId,
       acpSource: acpSource ?? existing.acpSource,
@@ -585,9 +586,7 @@ function upsertMetadata(
     title,
     sections,
     timestamp,
-    channelId: ctx.channelId,
-    turnId: ctx.turnId,
-    sessionId: ctx.sessionId,
+    ...ctx,
     acpSource,
   });
 }
@@ -659,6 +658,7 @@ function upsertTool(
           ? timestamp
           : existing.completedAt,
       channelId: ctx.channelId,
+      conversationRoot: ctx.conversationRoot ?? existing.conversationRoot,
       turnId: ctx.turnId ?? existing.turnId,
       sessionId: ctx.sessionId ?? existing.sessionId,
       acpSource: acpSource ?? existing.acpSource,
@@ -690,9 +690,7 @@ function upsertTool(
     timestamp,
     startedAt: timestamp,
     completedAt: isTerminalToolStatus(status) ? timestamp : null,
-    channelId: ctx.channelId,
-    turnId: ctx.turnId,
-    sessionId: ctx.sessionId,
+    ...ctx,
     acpSource,
   });
 }
@@ -711,6 +709,7 @@ export function processTranscriptEvent(
   const ch = channelId ?? "global";
   const ctx: TranscriptItemContext = {
     channelId,
+    conversationRoot: event.conversationRoot ?? null,
     turnId: event.turnId,
     sessionId: event.sessionId ?? d.latestSessionId,
   };

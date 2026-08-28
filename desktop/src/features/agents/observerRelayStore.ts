@@ -1,8 +1,8 @@
 import * as React from "react";
 
 import { subscribeToAgentObserverFrames } from "@/shared/api/observerRelay";
+import type { ControlResultFrame } from "@/shared/api/observerRelay";
 import type { RelayEvent, ManagedAgent } from "@/shared/api/types";
-import type { ControlResultFrame } from "@/shared/api/types";
 import { putAgentSessionConfig } from "@/shared/api/tauri";
 import { putManagedAgentRuntimeLifecycle } from "@/shared/api/tauriManagedAgents";
 import { getIdentity } from "@/shared/api/tauriIdentity";
@@ -147,15 +147,23 @@ const knownAgentPubkeys = new Set<string>();
 const knownAgentsBySubscription = new Map<string, Set<string>>();
 const pendingUnknownAgentFrames: RelayEvent[] = [];
 
-// Callback invoked when session_config_captured is received, so React Query
-// can invalidate the config-surface query for the affected agent. Wired up
-// by useManagedAgentObserverBridge via setSessionConfigCapturedCallback.
-let onSessionConfigCaptured: ((pubkey: string) => void) | null = null;
+// Co-mounted observer bridges each own a listener. A Set keeps one bridge's
+// cleanup from clobbering another bridge that remains mounted.
+const sessionConfigCapturedListeners = new Set<(pubkey: string) => void>();
 
-export function setSessionConfigCapturedCallback(
-  cb: ((pubkey: string) => void) | null,
+export function subscribeSessionConfigCaptured(
+  listener: (pubkey: string) => void,
 ) {
-  onSessionConfigCaptured = cb;
+  sessionConfigCapturedListeners.add(listener);
+  return () => {
+    sessionConfigCapturedListeners.delete(listener);
+  };
+}
+
+function notifySessionConfigCaptured(pubkey: string) {
+  for (const listener of sessionConfigCapturedListeners) {
+    listener(pubkey);
+  }
 }
 
 function recomputeKnownAgentPubkeys() {
@@ -456,7 +464,7 @@ function processLiveObserverEvents(
   // deferring only the global external-store publication.
   const addedEvents = appendAgentEvents(agentPubkey, events);
 
-  for (const parsed of events) {
+  for (const parsed of addedEvents ?? []) {
     // Track the latest-live-session-id per (agent, channel) on the live path.
     // Only set when the parsed event carries both a sessionId and channelId,
     // so we never attribute a session to the wrong channel.
@@ -484,7 +492,7 @@ function processLiveObserverEvents(
     }
     if (parsed.kind === "session_config_captured") {
       void putAgentSessionConfig(agentPubkey, parsed.payload);
-      onSessionConfigCaptured?.(agentPubkey);
+      notifySessionConfigCaptured(agentPubkey);
     } else if (parsed.kind === "control_result") {
       dispatchControlResult(agentPubkey, parsed.payload);
     } else if (parsed.kind === "managed_agent_runtime_lifecycle") {
@@ -757,12 +765,11 @@ export function useManagedAgentObserverBridge(
   // Wire up config-surface query invalidation when session_config_captured fires.
   const queryClient = useQueryClient();
   React.useEffect(() => {
-    setSessionConfigCapturedCallback((pubkey) => {
+    return subscribeSessionConfigCaptured((pubkey) => {
       void queryClient.invalidateQueries({
         queryKey: agentConfigSurfaceQueryKey(pubkey),
       });
     });
-    return () => setSessionConfigCapturedCallback(null);
   }, [queryClient]);
 }
 
@@ -884,7 +891,7 @@ export function resetAgentObserverStore() {
   pendingUnknownAgentFrames.length = 0;
   latestLiveSessionByAgentChannel.clear();
   agentManagementListeners.clear();
-  onSessionConfigCaptured = null;
+  sessionConfigCapturedListeners.clear();
   connectionState = "idle";
   errorMessage = null;
   notifyListeners();
@@ -909,6 +916,11 @@ export function _testProcessLiveObserverEvents(
   events: readonly ObserverEvent[],
 ): void {
   processLiveObserverEvents(agentPubkey, events);
+}
+
+/** Test-only: dispatch a captured-session notification without Tauri IO. */
+export function _testNotifySessionConfigCaptured(pubkey: string): void {
+  notifySessionConfigCaptured(pubkey);
 }
 
 /**

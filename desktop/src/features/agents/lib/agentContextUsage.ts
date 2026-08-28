@@ -26,6 +26,8 @@ export type TurnMetricPayload = {
   harness: string;
   model: string | null;
   channelId: string | null;
+  /** Thread root inside channelId; absent for DMs and pre-thread metrics. */
+  threadRoot?: string | null;
   sessionId: string | null;
   turnId: string | null;
   turnSeq: number | null;

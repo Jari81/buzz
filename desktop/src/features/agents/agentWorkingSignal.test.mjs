@@ -18,6 +18,8 @@ const AGENT =
   "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
 const AGENT_2 =
   "dcba4321dcba4321dcba4321dcba4321dcba4321dcba4321dcba4321dcba4321";
+const AGENT_3 =
+  "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
 function makeEvent(overrides) {
   return {
@@ -145,6 +147,23 @@ describe("getWorkingChannels", () => {
 });
 
 describe("getWorkingAgentPubkeysForChannel", () => {
+  it("scopes observer agents to one thread and keeps legacy fallback", () => {
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({ conversationRoot: "thread-a", turnId: "turn-a" }),
+    ]);
+    syncAgentTurnsFromEvents(AGENT_2, [
+      makeEvent({ conversationRoot: "thread-b", turnId: "turn-b" }),
+    ]);
+    syncAgentTurnsFromEvents(AGENT_3, [makeEvent({ turnId: "legacy-turn" })]);
+    reportChannelBotTyping("chan-1", [AGENT_2]);
+
+    assert.deepEqual(
+      new Set(getWorkingAgentPubkeysForChannel("chan-1", "thread-a")),
+      new Set([AGENT, AGENT_3]),
+      "sibling-thread and channel-wide typing signals must not leak into the thread",
+    );
+  });
+
   it("unions observer and typing agents for the channel", () => {
     startTurn(AGENT, "chan-1");
     reportChannelBotTyping("chan-1", [AGENT_2]);

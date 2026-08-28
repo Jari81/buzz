@@ -48,6 +48,7 @@ import { CreateChannelDialog } from "@/features/sidebar/ui/CreateChannelDialog";
 import { SidebarProfileCard } from "@/features/sidebar/ui/SidebarProfileCard";
 import { HuddleProfileControl } from "@/features/huddle";
 import type {
+  AppSidebarView,
   CollapsibleSidebarGroup,
   CreateChannelKind,
 } from "@/features/sidebar/ui/AppSidebar.types";
@@ -96,15 +97,7 @@ type AppSidebarProps = {
   selfPresenceStatus: PresenceStatus;
   errorMessage?: string;
   selectedChannelId: string | null;
-  selectedView:
-    | "home"
-    | "channel"
-    | "messages"
-    | "agents"
-    | "agent-sessions"
-    | "workflows"
-    | "pulse"
-    | "projects";
+  selectedView: AppSidebarView;
   unreadChannelCounts: ReadonlyMap<string, number>;
   unreadChannelIds: ReadonlySet<string>;
   previewActivityChannelIds: ReadonlySet<string>;

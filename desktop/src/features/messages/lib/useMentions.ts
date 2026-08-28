@@ -19,9 +19,7 @@ import {
   filterCachedAgentSuggestions,
   getAdmittedAgentPubkeys,
   getAgentIdentityPubkeys,
-  getMentionableAgentPubkeys,
   getSharedChannelIds,
-  isAgentMentionChannelType,
   rememberSelectedAgentPubkeys,
   shouldHideAgentFromMentions,
   uniqueAutocompleteLabels,
@@ -46,6 +44,7 @@ import { useAgentMentionRevalidation } from "./agentMentionRevalidation";
 import { hasMention } from "./hasMention";
 import { extractMentionPubkeys } from "./extractMentionPubkeys";
 import { useDraftMentionRouting } from "./useDraftMentionRouting";
+import { useMentionAgentEligibility } from "./useMentionAgentEligibility";
 import { rankMentionCandidates } from "./mentionRanking";
 import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
 import {
@@ -180,46 +179,18 @@ export function useMentions(
     () => getSharedChannelIds(channelsQuery.data),
     [channelsQuery.data],
   );
-  const mentionChannelId = isAgentMentionChannelType(options?.channelType)
-    ? channelId
-    : null;
-  const channelRosterReady =
-    membersQuery.data !== undefined &&
-    membersQuery.error === null &&
-    !membersQuery.isFetching;
-  const memberPubkeys = React.useMemo(
-    () =>
-      new Set(
-        (channelRosterReady ? (membersQuery.data ?? []) : []).map((member) =>
-          normalizePubkey(member.pubkey),
-        ),
-      ),
-    [channelRosterReady, membersQuery.data],
-  );
-  const mentionableAgentPubkeys = React.useMemo(
-    () =>
-      getMentionableAgentPubkeys({
-        currentPubkey,
-        eligibilityScope: mentionChannelId
-          ? {
-              type: "channel",
-              channelId: mentionChannelId,
-              memberPubkeys,
-            }
-          : { type: "managed-only" },
-        managedAgentPubkeys,
-        relayAgents: relayAgentsQuery.data,
-        sharedChannelIds,
-      }),
-    [
+  const { memberPubkeys, mentionableAgentPubkeys, mentionChannelId } =
+    useMentionAgentEligibility({
+      channelId,
+      channelType: options?.channelType,
       currentPubkey,
       managedAgentPubkeys,
-      memberPubkeys,
-      mentionChannelId,
-      relayAgentsQuery.data,
+      members: membersQuery.data,
+      membersError: membersQuery.error,
+      membersFetching: membersQuery.isFetching,
+      relayAgents: relayAgentsQuery.data,
       sharedChannelIds,
-    ],
-  );
+    });
   const personaNameByPubkey = React.useMemo(() => {
     const agents = managedAgentsQuery.data ?? [];
     const personas = personasQuery.data ?? [];

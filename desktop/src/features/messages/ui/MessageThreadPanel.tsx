@@ -117,6 +117,7 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   videoReviewPresentation?: VideoReviewPresentation;
   activityAccessoryContent?: React.ReactNode;
   activityAccessoryVisible: boolean;
+  composerToolbarExtraActions?: React.ReactNode;
   widthPx: number;
   isFollowingThread?: boolean;
   isMessageUnreadById?: (messageId: string) => boolean;
@@ -237,6 +238,7 @@ export function MessageThreadPanel({
   threadTypingPubkeys,
   activityAccessoryContent,
   activityAccessoryVisible,
+  composerToolbarExtraActions,
   widthPx,
   transparentChrome = false,
   autoSendDraftKey = null,
@@ -918,6 +920,7 @@ export function MessageThreadPanel({
               }
               profiles={profiles}
               replyTarget={composerReplyTarget}
+              toolbarExtraActions={composerToolbarExtraActions}
               typingParentEventId={threadHead.id}
               typingRootEventId={threadHead.rootId}
             />

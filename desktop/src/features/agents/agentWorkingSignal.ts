@@ -32,6 +32,7 @@ export type AgentWorkingSource = "observer" | "typing" | "none";
 
 export type AgentWorkingChannel = {
   channelId: string;
+  conversationRoot: string | null;
   /** Desktop-clock anchor for elapsed displays (turn start / first typing). */
   anchorAt: number;
   source: Exclude<AgentWorkingSource, "none">;
@@ -139,6 +140,7 @@ function computeAgentWorkingState(
 
   const channels: AgentWorkingChannel[] = turns.map((turn) => ({
     channelId: turn.channelId,
+    conversationRoot: turn.conversationRoot,
     anchorAt: turn.anchorAt,
     source: "observer" as const,
   }));
@@ -152,6 +154,7 @@ function computeAgentWorkingState(
     if (since !== undefined) {
       channels.push({
         channelId: typingChannelId,
+        conversationRoot: null,
         anchorAt: since,
         source: "typing",
       });
@@ -268,16 +271,18 @@ const EMPTY_PUBKEYS: string[] = [];
  */
 export function getWorkingAgentPubkeysForChannel(
   channelId: string | null | undefined,
+  conversationRoot: string | null = null,
 ): string[] {
   if (!channelId) {
     return EMPTY_PUBKEYS;
   }
-  const cached = channelPubkeysCache.get(channelId);
+  const cacheKey = `${channelId}\u0000${conversationRoot ?? ""}`;
+  const cached = channelPubkeysCache.get(cacheKey);
   if (cached) {
     return cached;
   }
   const merged = new Set<string>();
-  for (const summary of getActiveTurnsByChannel()) {
+  for (const summary of getActiveTurnsByChannel(conversationRoot)) {
     if (summary.channelId !== channelId) {
       continue;
     }
@@ -285,14 +290,18 @@ export function getWorkingAgentPubkeysForChannel(
       merged.add(normalizePubkey(pubkey));
     }
   }
-  const typing = typingByChannel.get(channelId);
+  // Channel typing has no conversation root. Thread composers merge their own
+  // thread-scoped typing entries separately, so only use this fallback for an
+  // unscoped channel query.
+  const typing =
+    conversationRoot === null ? typingByChannel.get(channelId) : undefined;
   if (typing) {
     for (const pubkey of typing.keys()) {
       merged.add(pubkey);
     }
   }
   const result = merged.size === 0 ? EMPTY_PUBKEYS : [...merged].sort();
-  channelPubkeysCache.set(channelId, result);
+  channelPubkeysCache.set(cacheKey, result);
   return result;
 }
 
@@ -319,9 +328,10 @@ export function useWorkingChannels(): WorkingChannelSummary[] {
 /** Normalized pubkeys of agents working in a channel. */
 export function useChannelWorkingAgentPubkeys(
   channelId: string | null | undefined,
+  conversationRoot: string | null = null,
 ): string[] {
   return React.useSyncExternalStore(subscribeAgentWorkingSignal, () =>
-    getWorkingAgentPubkeysForChannel(channelId),
+    getWorkingAgentPubkeysForChannel(channelId, conversationRoot),
   );
 }
 

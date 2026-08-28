@@ -54,6 +54,7 @@ const PRUNE_INTERVAL_MS = 5_000;
 type ActiveTurn = {
   turnId: string;
   channelId: string;
+  conversationRoot: string | null;
   startedAt: number;
   lastActivityAt: number;
 };
@@ -61,6 +62,7 @@ type ActiveTurn = {
 /** One working channel surfaced to the UI, anchored to the desktop clock. */
 export type ActiveTurnSummary = {
   channelId: string;
+  conversationRoot: string | null;
   anchorAt: number;
 };
 
@@ -96,8 +98,11 @@ const clockOffsetByAgent = new Map<string, number>();
 
 // Cached snapshots for useSyncExternalStore reference stability.
 // Only regenerated when the underlying turn map for an agent actually changes.
-const cachedTurnSummaries = new Map<string, ActiveTurnSummary[]>();
-let cachedChannelTurnSummaries: ActiveChannelTurnSummary[] | null = null;
+const cachedTurnSummaries = new Map<string, Map<string, ActiveTurnSummary[]>>();
+const cachedChannelTurnSummaries = new Map<
+  string,
+  ActiveChannelTurnSummary[]
+>();
 
 // Composite watermark per (agent, channel): the newest observer event
 // processed for that channel, by (timestamp, seq) ordering. An event is
@@ -143,7 +148,7 @@ let unsubscribePruneVisibility: (() => void) | null = null;
 
 function invalidateCache(agentKey: string) {
   cachedTurnSummaries.delete(agentKey);
-  cachedChannelTurnSummaries = null;
+  cachedChannelTurnSummaries.clear();
 }
 
 function notifyListeners() {
@@ -179,6 +184,7 @@ function startTurn(
   channelId: string,
   turnId: string,
   timestamp: string,
+  conversationRoot: string | null = null,
 ) {
   const key = normalizePubkey(agentPubkey);
   let agentTurns = activeTurnsByAgent.get(key);
@@ -206,6 +212,7 @@ function startTurn(
   agentTurns.set(turnId, {
     turnId,
     channelId,
+    conversationRoot,
     startedAt,
     lastActivityAt: Date.now(),
   });
@@ -254,7 +261,13 @@ function resurrectTurn(agentPubkey: string, event: ObserverEvent): boolean {
     frameAt !== null && startedAtMs !== null && startedAtMs <= frameAt
       ? startedAt
       : event.timestamp;
-  startTurn(agentPubkey, event.channelId, event.turnId, safeStartedAt);
+  startTurn(
+    agentPubkey,
+    event.channelId,
+    event.turnId,
+    safeStartedAt,
+    event.conversationRoot ?? null,
+  );
   return true;
 }
 
@@ -281,6 +294,7 @@ function endTurn(
   agentPubkey: string,
   turnId: string | null,
   channelId: string | null,
+  conversationRoot: string | null,
   terminalAt: number,
 ) {
   const key = normalizePubkey(agentPubkey);
@@ -298,10 +312,15 @@ function endTurn(
   if (turnId) {
     agentTurns.delete(turnId);
   } else if (channelId) {
-    // Fallback: remove by channelId if turnId not available. Tombstone the
-    // resolved turn so a later stale liveness for it can't resurrect a badge.
+    // Fallback: modern thread terminals match channel + root. A root-less
+    // legacy terminal preserves the historical channel-only fallback.
+    // Tombstone the resolved turn so stale liveness cannot resurrect it.
     for (const [tid, turn] of agentTurns) {
-      if (turn.channelId === channelId) {
+      if (
+        turn.channelId === channelId &&
+        (conversationRoot === null ||
+          turn.conversationRoot === conversationRoot)
+      ) {
         agentTurns.delete(tid);
         recordTerminal(key, tid, terminalAt);
         break;
@@ -408,6 +427,7 @@ function processEvent(agentPubkey: string, event: ObserverEvent) {
           event.channelId,
           event.turnId ?? `seq-${event.seq}`,
           event.timestamp,
+          event.conversationRoot ?? null,
         );
         notifyListeners();
         return;
@@ -420,6 +440,7 @@ function processEvent(agentPubkey: string, event: ObserverEvent) {
         agentPubkey,
         event.turnId ?? null,
         event.channelId ?? null,
+        event.conversationRoot ?? null,
         Date.parse(event.timestamp),
       );
       notifyListeners();
@@ -494,35 +515,55 @@ export function subscribeActiveAgentTurns(listener: () => void) {
  */
 export function getActiveTurnsForAgent(
   agentPubkey: string | null | undefined,
+  conversationRoot: string | null = null,
 ): ActiveTurnSummary[] {
   if (!agentPubkey) return EMPTY_TURNS;
   const key = normalizePubkey(agentPubkey);
   const agentTurns = activeTurnsByAgent.get(key);
   if (!agentTurns || agentTurns.size === 0) return EMPTY_TURNS;
 
-  const cached = cachedTurnSummaries.get(key);
+  const scopeKey = conversationRoot ?? "";
+  const agentCache = cachedTurnSummaries.get(key);
+  const cached = agentCache?.get(scopeKey);
   if (cached) return cached;
 
   const offset = clockOffsetByAgent.get(key) ?? 0;
 
-  // Collapse multiple turns in one channel to the earliest start — the badge
-  // should count from when the channel's oldest live turn began. Anchors are
-  // derived here (startedAt + offset) so the latest skew estimate applies.
-  const earliestByChannel = new Map<string, number>();
+  // Collapse multiple turns in one conversation to the earliest start. A
+  // scoped thread also admits root-less legacy/DM frames as channel fallback.
+  const earliestByConversation = new Map<
+    string,
+    { channelId: string; conversationRoot: string | null; startedAt: number }
+  >();
   for (const turn of agentTurns.values()) {
-    const prior = earliestByChannel.get(turn.channelId);
-    if (prior === undefined || turn.startedAt < prior) {
-      earliestByChannel.set(turn.channelId, turn.startedAt);
+    if (
+      conversationRoot !== null &&
+      turn.conversationRoot !== null &&
+      turn.conversationRoot !== conversationRoot
+    ) {
+      continue;
+    }
+    const conversationKey = `${turn.channelId}\u0000${turn.conversationRoot ?? ""}`;
+    const prior = earliestByConversation.get(conversationKey);
+    if (!prior || turn.startedAt < prior.startedAt) {
+      earliestByConversation.set(conversationKey, turn);
     }
   }
 
-  const result = [...earliestByChannel.entries()]
-    .map(([channelId, startedAt]) => ({
-      channelId,
-      anchorAt: startedAt + offset,
+  const result = [...earliestByConversation.values()]
+    .map((turn) => ({
+      channelId: turn.channelId,
+      conversationRoot: turn.conversationRoot,
+      anchorAt: turn.startedAt + offset,
     }))
-    .sort((a, b) => a.channelId.localeCompare(b.channelId));
-  cachedTurnSummaries.set(key, result);
+    .sort(
+      (a, b) =>
+        a.channelId.localeCompare(b.channelId) ||
+        (a.conversationRoot ?? "").localeCompare(b.conversationRoot ?? ""),
+    );
+  const nextAgentCache = agentCache ?? new Map<string, ActiveTurnSummary[]>();
+  nextAgentCache.set(scopeKey, result);
+  cachedTurnSummaries.set(key, nextAgentCache);
   return result;
 }
 
@@ -533,8 +574,12 @@ const EMPTY_CHANNEL_TURNS: ActiveChannelTurnSummary[] = [];
  * Returns active working channels across all tracked agents, sorted by
  * channelId and anchored to the earliest live turn in each channel.
  */
-export function getActiveTurnsByChannel(): ActiveChannelTurnSummary[] {
-  if (cachedChannelTurnSummaries) return cachedChannelTurnSummaries;
+export function getActiveTurnsByChannel(
+  conversationRoot: string | null = null,
+): ActiveChannelTurnSummary[] {
+  const scopeKey = conversationRoot ?? "";
+  const cached = cachedChannelTurnSummaries.get(scopeKey);
+  if (cached) return cached;
   if (activeTurnsByAgent.size === 0) return EMPTY_CHANNEL_TURNS;
 
   const summaries = new Map<
@@ -547,6 +592,13 @@ export function getActiveTurnsByChannel(): ActiveChannelTurnSummary[] {
     const offset = clockOffsetByAgent.get(agentKey) ?? 0;
 
     for (const turn of agentTurns.values()) {
+      if (
+        conversationRoot !== null &&
+        turn.conversationRoot !== null &&
+        turn.conversationRoot !== conversationRoot
+      ) {
+        continue;
+      }
       const anchorAt = turn.startedAt + offset;
       const summary = summaries.get(turn.channelId);
       if (!summary) {
@@ -572,7 +624,7 @@ export function getActiveTurnsByChannel(): ActiveChannelTurnSummary[] {
       agentPubkeys: [...summary.agentPubkeys].sort(),
     }))
     .sort((a, b) => a.channelId.localeCompare(b.channelId));
-  cachedChannelTurnSummaries = result;
+  cachedChannelTurnSummaries.set(scopeKey, result);
   return result;
 }
 
@@ -596,10 +648,11 @@ export function syncAgentTurnsFromEvents(
  */
 export function useActiveAgentTurns(
   agentPubkey: string | null | undefined,
+  conversationRoot: string | null = null,
 ): ActiveTurnSummary[] {
   const getSnapshot = React.useCallback(
-    () => getActiveTurnsForAgent(agentPubkey),
-    [agentPubkey],
+    () => getActiveTurnsForAgent(agentPubkey, conversationRoot),
+    [agentPubkey, conversationRoot],
   );
 
   return React.useSyncExternalStore(subscribeActiveAgentTurns, getSnapshot);
@@ -709,7 +762,7 @@ export function resetActiveAgentTurnsStore() {
   lastProcessed.clear();
   clockOffsetByAgent.clear();
   cachedTurnSummaries.clear();
-  cachedChannelTurnSummaries = null;
+  cachedChannelTurnSummaries.clear();
   terminalAtByAgent.clear();
   notifyListeners();
 }
@@ -825,7 +878,7 @@ export function restoreActiveAgentTurnsForCommunity(communityId: string): void {
   }
 
   cachedTurnSummaries.clear();
-  cachedChannelTurnSummaries = null;
+  cachedChannelTurnSummaries.clear();
   notifyListeners();
 }
 

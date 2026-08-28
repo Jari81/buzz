@@ -6,10 +6,6 @@ import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import { ComposerDockBackdrop } from "@/features/messages/ui/ComposerDockBackdrop";
 import { ComposerUploadProgressOverlay } from "@/features/messages/ui/ComposerUploadProgressOverlay";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
-import {
-  ContextUsageRing,
-  formatTokenCount,
-} from "@/features/messages/ui/ContextUsageRing";
 import { ComposerTimeoutBanner } from "@/features/moderation/ui/ComposerTimeoutBanner";
 import { useTimeoutState } from "@/features/moderation/lib/timeoutStore";
 import { isModerationDm } from "@/features/moderation/lib/moderationDm";
@@ -41,7 +37,6 @@ import { useThreadViewMode } from "@/features/channels/lib/threadViewModePrefere
 import { useThreadViewModeSwitch } from "@/features/channels/ui/useThreadViewModeSwitch";
 import { useFocusDrawerPresence } from "@/features/channels/ui/useFocusDrawerPresence";
 import { useChannelWorkingAgentPubkeys } from "@/features/agents/agentWorkingSignal";
-import { useChannelContextUsage } from "@/features/agents/lib/channelContextUsage";
 import { useCardMintJobs } from "@/features/agents/cardMintStore";
 import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar";
 import { mergeThreadComposerActivityPubkeys } from "@/features/channels/ui/channelComposerActivityMerge";
@@ -58,6 +53,7 @@ import type { ChannelPaneProps } from "@/features/channels/ui/ChannelPane.types"
 import * as agentSessionSelection from "@/features/channels/ui/agentSessionSelection";
 import { usePrepareDmSendChannel } from "@/features/channels/ui/usePrepareDmSendChannel";
 import { useChannelPaneMessages } from "@/features/channels/ui/useChannelPaneMessages";
+import { useChannelContextRings } from "@/features/channels/ui/useChannelContextRings";
 import { Button } from "@/shared/ui/button";
 import { useRenderScopedReactionHydration } from "@/features/messages/lib/useRenderScopedReactionHydration";
 import type { TimelineMessage } from "@/features/messages/types";
@@ -368,6 +364,10 @@ export const ChannelPane = React.memo(function ChannelPane({
   const composerWorkingBotPubkeys = useChannelWorkingAgentPubkeys(
     activeChannel?.id ?? null,
   );
+  const threadObserverWorkingPubkeys = useChannelWorkingAgentPubkeys(
+    activeChannel?.id ?? null,
+    openThreadHeadId,
+  );
   const hasComposerBotActivity = composerWorkingBotPubkeys.length > 0;
   const hasCardMintActivity = useCardMintJobs().length > 0;
   const hasComposerBottomActivity =
@@ -377,13 +377,14 @@ export const ChannelPane = React.memo(function ChannelPane({
     const threadTyping = botTypingEntries
       .filter((entry) => entry.threadHeadId === openThreadHeadId)
       .map((entry) => entry.pubkey);
-    // BUZZ-DESKTOP-003: merge the channel-level working set so threads
-    // render the activity bar, not only "is typing".
+    // Thread activity uses observer frames scoped by conversationRoot plus the
+    // thread's own typing entries. Legacy observer frames remain available via
+    // the store's channel-level fallback.
     return mergeThreadComposerActivityPubkeys(
       threadTyping,
-      composerWorkingBotPubkeys,
+      threadObserverWorkingPubkeys,
     );
-  }, [botTypingEntries, composerWorkingBotPubkeys, openThreadHeadId]);
+  }, [botTypingEntries, openThreadHeadId, threadObserverWorkingPubkeys]);
   const hasThreadComposerBotActivity =
     threadComposerBotTypingPubkeys.length > 0;
   const directMessageIntro = React.useMemo(
@@ -396,34 +397,13 @@ export const ChannelPane = React.memo(function ChannelPane({
     [activeChannel, currentPubkey, profiles],
   );
 
-  // BUZZ-DESKTOP-003: DM context-fill ring. Only mounted for DM channels —
-  // channel-scoped metrics let us attribute usage to the DM's agent without
-  // agent-pubkey plumbing.
   const isDmChannel = activeChannel?.channelType === "dm";
-  const channelContextUsage = useChannelContextUsage(
-    isDmChannel ? (activeChannel?.id ?? null) : null,
+  const { dmContextRing, threadContextRing } = useChannelContextRings({
+    channelId: activeChannel?.id ?? null,
     currentPubkey,
-  );
-  const dmContextRing = React.useMemo(() => {
-    if (!isDmChannel || !channelContextUsage) return null;
-    const { usageRatio, model, lastInputTokens, contextWindow } =
-      channelContextUsage;
-    const pct = usageRatio == null ? null : Math.round(usageRatio * 100);
-    const label = [
-      model ?? "unknown model",
-      pct == null ? "no usage data" : `${pct}% context used`,
-      lastInputTokens != null && contextWindow > 0
-        ? `${formatTokenCount(lastInputTokens)}/${formatTokenCount(contextWindow)} tokens`
-        : null,
-    ]
-      .filter(Boolean)
-      .join(" · ");
-    return (
-      <span className="inline-flex items-center px-1" title={label}>
-        <ContextUsageRing label={label} ratio={usageRatio} />
-      </span>
-    );
-  }, [channelContextUsage, isDmChannel]);
+    isDmChannel,
+    threadRoot: openThreadHeadId,
+  });
 
   const handleWelcomeAddAgent = React.useCallback(() => {
     onAddAgent?.({
@@ -887,11 +867,13 @@ export const ChannelPane = React.memo(function ChannelPane({
                 threadReplyUnreadCounts={threadReplyUnreadCounts}
                 threadTypingPubkeys={threadTypingPubkeys}
                 activityAccessoryVisible={hasThreadComposerBotActivity}
+                composerToolbarExtraActions={threadContextRing}
                 activityAccessoryContent={
                   hasThreadComposerBotActivity ? (
                     <BotActivityComposerAction
                       agents={activityAgents}
                       channelId={activeChannel?.id ?? null}
+                      conversationRoot={openThreadHeadId}
                       onOpenAgentSession={onOpenAgentSession}
                       openAgentSessionPubkey={openAgentSessionPubkey}
                       profiles={profiles}

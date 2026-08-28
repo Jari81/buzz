@@ -54,6 +54,42 @@ describe("activeAgentTurnsStore", () => {
     resetActiveAgentTurnsStore();
   });
 
+  describe("conversation scoping", () => {
+    it("separates sibling threads while retaining legacy channel fallback", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 1,
+          turnId: "thread-a-turn",
+          conversationRoot: "thread-a",
+        }),
+        makeEvent({
+          seq: 2,
+          timestamp: "2024-01-01T00:00:01Z",
+          turnId: "thread-b-turn",
+          conversationRoot: "thread-b",
+        }),
+        makeEvent({
+          seq: 3,
+          timestamp: "2024-01-01T00:00:02Z",
+          turnId: "legacy-turn",
+        }),
+      ]);
+
+      const allTurns = getActiveTurnsForAgent(AGENT);
+      assert.deepEqual(
+        allTurns.map((turn) => turn.conversationRoot),
+        [null, "thread-a", "thread-b"],
+      );
+
+      const threadATurns = getActiveTurnsForAgent(AGENT, "thread-a");
+      assert.deepEqual(
+        threadATurns.map((turn) => turn.conversationRoot),
+        [null, "thread-a"],
+        "a thread sees its own observer work plus unscoped legacy frames",
+      );
+    });
+  });
+
   describe("seq filtering", () => {
     it("processes events with increasing seq", () => {
       syncAgentTurnsFromEvents(AGENT, [
@@ -364,6 +400,37 @@ describe("activeAgentTurnsStore", () => {
       ]);
       // Turn should still be active — no way to identify which to end
       assert.equal(getActiveTurnsForAgent(AGENT).length, 1);
+    });
+
+    it("turnId-less terminal removes the matching sibling thread", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 1,
+          turnId: "thread-a-turn",
+          channelId: "c1",
+          conversationRoot: "thread-a",
+        }),
+        makeEvent({
+          seq: 2,
+          timestamp: "2024-01-01T00:00:01Z",
+          turnId: "thread-b-turn",
+          channelId: "c1",
+          conversationRoot: "thread-b",
+        }),
+        makeEvent({
+          seq: 3,
+          timestamp: "2024-01-01T00:00:02Z",
+          kind: "turn_completed",
+          turnId: null,
+          channelId: "c1",
+          conversationRoot: "thread-b",
+        }),
+      ]);
+
+      assert.deepEqual(
+        getActiveTurnsForAgent(AGENT).map((turn) => turn.conversationRoot),
+        ["thread-a"],
+      );
     });
 
     it("channelId fallback removes only one matching turn", () => {

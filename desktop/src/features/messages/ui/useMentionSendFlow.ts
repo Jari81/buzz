@@ -20,21 +20,14 @@ import { filterEffectiveExplicitAgentPubkeys } from "@/features/messages/lib/eff
 import {
   prepareBackgroundMediaUpload,
   saveQueuedAttachmentsForDraft,
-  type QueuedMediaAttachment,
 } from "@/features/messages/lib/backgroundMediaUploadStore";
-import type { UseChannelLinksResult } from "@/features/messages/lib/useChannelLinks";
-import type { UseEmojiAutocompleteResult } from "@/features/messages/lib/useEmojiAutocomplete";
 import {
   buildOutgoingMessage,
   type ImetaMedia,
 } from "@/features/messages/lib/imetaMediaMarkdown";
-import type { UseMentionsResult } from "@/features/messages/lib/useMentions";
-import type { UseRichTextEditorResult } from "@/features/messages/lib/useRichTextEditor";
-import type { UseDraftsResult } from "@/features/messages/lib/useDrafts";
 import { useActivePreparedLinkPreviews } from "./useActivePreparedLinkPreviews";
 import { invokeTauri } from "@/shared/api/tauri";
-import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
-import type { AcpRuntime, ChannelType, ManagedAgent } from "@/shared/api/types";
+import type { AcpRuntime, ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
 import {
@@ -48,50 +41,8 @@ import {
   resolvePreviewTags,
   uniqueNormalizedPubkeys,
 } from "./useMentionSendFlow.helpers";
-type UseMentionSendFlowOptions = {
-  channelId: string | null;
-  channelLinks: Pick<UseChannelLinksResult, "clearChannels">;
-  channelType: ChannelType | null;
-  contentRef: React.MutableRefObject<string>;
-  customEmoji: CustomEmoji[];
-  drafts: Pick<UseDraftsResult, "loadDraft" | "markDraftSent" | "persistDraft">;
-  emojiAutocomplete: Pick<UseEmojiAutocompleteResult, "clearEmojis">;
-  mentions: UseMentionsResult;
-  onPrepareSendChannel?: (pubkeys?: string[]) => Promise<string | null>;
-  onSendRef: React.MutableRefObject<
-    (
-      content: string,
-      mentionPubkeys: string[],
-      mediaTags?: string[][],
-      channelId?: string | null,
-      threadContext?: {
-        parentEventId: string | null;
-        threadHeadId: string | null;
-      } | null,
-      forceRest?: boolean,
-    ) => Promise<void>
-  >;
-  richText: Pick<
-    UseRichTextEditorResult,
-    "clearContent" | "setContent" | "restorePlainTextAndFocusEnd"
-  >;
-  setContent: (content: string) => void;
-  setIsEmojiPickerOpen: React.Dispatch<React.SetStateAction<boolean>>;
-  setPendingImeta: (pendingImeta: ImetaMedia[]) => void;
-  hasUnsavedMedia: () => boolean;
-  clearQueuedAttachments: () => void;
-  restoreQueuedAttachments: (attachments: QueuedMediaAttachment[]) => void;
-  setSpoileredAttachmentUrls?: React.Dispatch<
-    React.SetStateAction<Set<string>>
-  >;
-  onSuccessfulExplicitAgentAudience?: (audience: {
-    channelId: string;
-    expectedGeneration: number;
-    expectedRevision: number | null;
-    explicitAgentPubkeys: string[];
-  }) => void;
-  resolvePostSendContent?: (effectiveExplicitAgentPubkeys: string[]) => string;
-};
+import type { UseMentionSendFlowOptions } from "./useMentionSendFlow.types";
+
 export function useMentionSendFlow({
   channelId,
   channelLinks,

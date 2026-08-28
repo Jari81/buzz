@@ -39,8 +39,22 @@ test("asTurnMetric accepts payload rows and rejects relay envelopes", () => {
 test("foldTurnMetrics takes the newest turn as the fill proxy", () => {
   // Archive rows arrive newest-first.
   const rows = [
-    metric({ turn: { inputTokens: 118_000, outputTokens: 1, totalTokens: 1, costUsd: null } }),
-    metric({ turn: { inputTokens: 90_000, outputTokens: 1, totalTokens: 1, costUsd: null } }),
+    metric({
+      turn: {
+        inputTokens: 118_000,
+        outputTokens: 1,
+        totalTokens: 1,
+        costUsd: null,
+      },
+    }),
+    metric({
+      turn: {
+        inputTokens: 90_000,
+        outputTokens: 1,
+        totalTokens: 1,
+        costUsd: null,
+      },
+    }),
   ];
   const summary = foldTurnMetrics(rows);
   assert.equal(summary.lastInputTokens, 118_000);
@@ -52,8 +66,14 @@ test("foldTurnMetrics takes the newest turn as the fill proxy", () => {
 });
 
 test("foldTurnMetrics sums per-turn costs", () => {
-  const rows = [metric({ turn: { inputTokens: 1, outputTokens: 1, totalTokens: 1, costUsd: 0.1 } }),
-    metric({ turn: { inputTokens: 1, outputTokens: 1, totalTokens: 1, costUsd: 0.25 } })];
+  const rows = [
+    metric({
+      turn: { inputTokens: 1, outputTokens: 1, totalTokens: 1, costUsd: 0.1 },
+    }),
+    metric({
+      turn: { inputTokens: 1, outputTokens: 1, totalTokens: 1, costUsd: 0.25 },
+    }),
+  ];
   const summary = foldTurnMetrics(rows);
   assert.ok(Math.abs(summary.totalCostUsd - 0.35) < 1e-9);
 });
@@ -73,14 +93,27 @@ test("foldTurnMetrics returns null ratio when no token data exists", () => {
 });
 
 test("foldTurnMetrics promotes the window when a turn exceeded it", () => {
-  const rows = [metric({ turn: { inputTokens: 250_000, outputTokens: 1, totalTokens: 1, costUsd: null } })];
+  const rows = [
+    metric({
+      turn: {
+        inputTokens: 250_000,
+        outputTokens: 1,
+        totalTokens: 1,
+        costUsd: null,
+      },
+    }),
+  ];
   const summary = foldTurnMetrics(rows);
   assert.equal(summary.contextWindow, 1_048_576);
   assert.ok(Math.abs(summary.usageRatio - 250_000 / 1_048_576) < 1e-9);
 });
 
 test("foldTurnMetrics collects distinct session ids newest-first", () => {
-  const rows = [metric({ sessionId: "s2" }), metric({ sessionId: "s1" }), metric({ sessionId: "s2" })];
+  const rows = [
+    metric({ sessionId: "s2" }),
+    metric({ sessionId: "s1" }),
+    metric({ sessionId: "s2" }),
+  ];
   const summary = foldTurnMetrics(rows);
   assert.deepEqual(summary.sessionIds, ["s2", "s1"]);
 });

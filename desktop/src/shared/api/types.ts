@@ -474,12 +474,6 @@ export type SwitchManagedAgentModelStatus =
   | "unsupported_model"
   | "no_active_turn";
 
-export type ControlResultFrame = {
-  type: "cancel_turn" | "switch_model";
-  status: string;
-  modelId?: string;
-};
-
 export type GitBashPrerequisite = {
   available: boolean;
   path: string | null;

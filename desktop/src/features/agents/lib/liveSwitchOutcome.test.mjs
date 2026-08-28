@@ -4,9 +4,16 @@ import test from "node:test";
 import { awaitLiveSwitchOutcome } from "./liveSwitchOutcome.ts";
 
 const MODEL = "goose-claude-fable-5";
+const REQUEST_ID = "switch-request-1";
 
 function frame(status, overrides = {}) {
-  return { type: "switch_model", status, modelId: MODEL, ...overrides };
+  return {
+    type: "switch_model",
+    status,
+    modelId: MODEL,
+    requestId: REQUEST_ID,
+    ...overrides,
+  };
 }
 
 /**
@@ -15,7 +22,7 @@ function frame(status, overrides = {}) {
  * no-ops, matching `observerRelayStore`), a manual timeout, and a deferred
  * `sendSwitches` the test resolves explicitly.
  */
-function harness(channelCount) {
+function harness(channelCount, conversationRoot = null) {
   let listener = null;
   let timeoutCb = null;
   let unsubscribeCalls = 0;
@@ -28,6 +35,8 @@ function harness(channelCount) {
   const outcome = awaitLiveSwitchOutcome({
     channelCount,
     modelId: MODEL,
+    requestId: REQUEST_ID,
+    conversationRoot,
     subscribe: (fn) => {
       listener = fn;
       return () => {
@@ -126,6 +135,57 @@ test("awaitLiveSwitchOutcome ignores frames for a different model or control typ
 
   h.push(frame("switched"));
   assert.equal(await h.outcome, "ok");
+});
+
+test("awaitLiveSwitchOutcome ignores missing and mismatched request ids", async () => {
+  const h = harness(1);
+  h.push(frame("unsupported_model", { requestId: undefined }));
+  h.push(frame("unsupported_model", { requestId: "another-switch" }));
+  let settled = false;
+  void h.outcome.then(() => {
+    settled = true;
+  });
+  await Promise.resolve();
+  assert.equal(
+    settled,
+    false,
+    "uncorrelated frames must not settle this request",
+  );
+
+  h.push(frame("switched"));
+  assert.equal(await h.outcome, "ok");
+});
+
+test("awaitLiveSwitchOutcome ignores a sibling conversation result", async () => {
+  const h = harness(1, "thread-a");
+  h.push(frame("unsupported_model", { conversationRoot: "thread-b" }));
+  let settled = false;
+  void h.outcome.then(() => {
+    settled = true;
+  });
+  await Promise.resolve();
+  assert.equal(settled, false);
+
+  h.push(frame("switched", { conversationRoot: "thread-a" }));
+  assert.equal(await h.outcome, "ok");
+});
+
+test("awaitLiveSwitchOutcome surfaces other in-flight turns as ambiguous", async () => {
+  const h = harness(1, "thread-a");
+  h.push(frame("other_turns_in_flight", { conversationRoot: "thread-a" }));
+  assert.equal(await h.outcome, "ambiguous");
+});
+
+test("awaitLiveSwitchOutcome rejects when the model catalog is unavailable", async () => {
+  const h = harness(1);
+  h.push(frame("catalog_unavailable"));
+  await assert.rejects(h.outcome, /catalog_unavailable/);
+});
+
+test("awaitLiveSwitchOutcome rejects a future unknown status", async () => {
+  const h = harness(1);
+  h.push(frame("future_switch_status"));
+  await assert.rejects(h.outcome, /future_switch_status/);
 });
 
 test("awaitLiveSwitchOutcome resolves ok via the timeout fallback when the harness never replies", async () => {

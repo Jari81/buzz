@@ -1,4 +1,11 @@
-import { Activity, Bot, FolderGit2, Inbox, TerminalSquare, Zap } from "lucide-react";
+import {
+  Activity,
+  Bot,
+  FolderGit2,
+  Inbox,
+  TerminalSquare,
+  Zap,
+} from "lucide-react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { FeatureGate } from "@/shared/features";

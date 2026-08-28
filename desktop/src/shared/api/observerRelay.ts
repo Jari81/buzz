@@ -11,6 +11,20 @@ import { relayClient } from "./relayClient";
 // local Tauri archive, so there is no double-processing risk.
 const OBSERVER_LIVE_LOOKBACK_SECS = 300;
 
+export type ControlResultFrame = {
+  type: "cancel_turn" | "switch_model" | "list_models";
+  status: string;
+  requestId?: string;
+  modelId?: string;
+  conversationRoot?: string | null;
+  targets?: Array<{ channelId: string; conversationRoot?: string | null }>;
+  models?: string[];
+  currentModelId?: string | null;
+  desiredModelId?: string | null;
+  totalCount?: number;
+  truncated?: boolean;
+};
+
 export function subscribeToAgentObserverFrames(
   ownerPubkey: string,
   onEvent: (event: RelayEvent) => void,

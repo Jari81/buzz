@@ -24,6 +24,13 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 
+function liveSwitchRequestId(): string {
+  return (
+    globalThis.crypto?.randomUUID?.() ??
+    `switch-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  );
+}
+
 export function ModelPicker({
   agent,
   onModelChanged,
@@ -107,25 +114,27 @@ export function ModelPicker({
     return labels[origin] ?? null;
   }, [configSurface]);
 
-  // Send a live `switch_model` frame to each channel the agent is working in
-  // and wait for the harness to acknowledge. Any single `unsupported_model`
-  // result rejects the whole pick immediately; all other statuses must arrive
-  // from every channel before resolving success.
+  // Send one atomic `switch_model` frame naming every active conversation and
+  // wait for the harness's single aggregate acknowledgement.
   const sendLiveSwitch = React.useCallback(
     (modelId: string) => {
-      const channelIds = activeTurns.map((turn) => turn.channelId);
+      const requestId = liveSwitchRequestId();
       return awaitLiveSwitchOutcome({
-        channelCount: channelIds.length,
+        channelCount: 1,
         modelId,
+        requestId,
         subscribe: (listener) =>
           subscribeControlResults(agent.pubkey, listener),
-        sendSwitches: async () => {
-          await Promise.all(
-            channelIds.map((channelId) =>
-              switchManagedAgentModel(agent.pubkey, channelId, modelId),
-            ),
-          );
-        },
+        sendSwitches: () =>
+          switchManagedAgentModel(
+            agent.pubkey,
+            activeTurns.map(({ channelId, conversationRoot }) => ({
+              channelId,
+              conversationRoot,
+            })),
+            modelId,
+            requestId,
+          ),
         // No reply in time: treat as sent. The override still rides the
         // requeued/next session; we just can't confirm synchronously.
         scheduleTimeout: (onTimeout) => {
@@ -145,6 +154,12 @@ export function ModelPicker({
         const outcome = await sendLiveSwitch(modelId);
         if (outcome === "unsupported") {
           toast.error("That model isn't available for this agent.");
+          return;
+        }
+        if (outcome === "ambiguous") {
+          toast.error(
+            "Another conversation is using this agent. Try again when that turn finishes.",
+          );
           return;
         }
         toast.success("Model switched for this session.");

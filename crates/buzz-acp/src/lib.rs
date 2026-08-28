@@ -1459,131 +1459,204 @@ fn handle_list_models_control(
     }
 }
 
-/// Handle a `switch_model` control frame.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SwitchModelTarget {
+    channel_id: Uuid,
+    scope: Option<ConversationScope>,
+}
+
+fn resolve_switch_channel_scope(pool: &AgentPool, channel_id: Uuid) -> Option<ConversationScope> {
+    let mut scopes = pool.conversation_scopes_for_channel(channel_id);
+    scopes.extend(
+        pool.in_flight_scopes()
+            .into_iter()
+            .filter(|scope| scope.channel_id() == channel_id),
+    );
+    scopes.sort();
+    scopes.dedup();
+    (scopes.len() == 1).then(|| scopes.remove(0))
+}
+
+fn parse_switch_model_target(
+    value: &serde_json::Value,
+    pool: &AgentPool,
+) -> Result<SwitchModelTarget, ()> {
+    let channel_id = value
+        .get("channelId")
+        .and_then(|value| value.as_str())
+        .and_then(|value| value.parse::<Uuid>().ok())
+        .ok_or(())?;
+    let scope = match value.get("conversationRoot") {
+        Some(root) if !root.is_null() => {
+            let root = root.as_str().ok_or(())?;
+            if root.len() != 64 || !root.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(());
+            }
+            Some(ConversationScope::thread(
+                channel_id,
+                root.to_ascii_lowercase(),
+            ))
+        }
+        _ => resolve_switch_channel_scope(pool, channel_id),
+    };
+    Ok(SwitchModelTarget { channel_id, scope })
+}
+
+fn parse_switch_model_targets(
+    payload: &serde_json::Value,
+    pool: &AgentPool,
+) -> Result<Vec<SwitchModelTarget>, ()> {
+    let mut targets = Vec::new();
+    if let Some(value) = payload.get("targets") {
+        let values = value
+            .as_array()
+            .filter(|values| !values.is_empty())
+            .ok_or(())?;
+        for value in values {
+            let target = parse_switch_model_target(value, pool)?;
+            if !targets.contains(&target) {
+                targets.push(target);
+            }
+        }
+    } else {
+        targets.push(parse_switch_model_target(payload, pool)?);
+    }
+    Ok(targets)
+}
+
+fn emit_switch_model_result(
+    observer: Option<&observer::ObserverHandle>,
+    request_id: Option<&str>,
+    model_id: &str,
+    status: &str,
+    targets: &[SwitchModelTarget],
+) {
+    let Some(observer) = observer else {
+        return;
+    };
+    let channel_id = targets.first().map(|target| target.channel_id.to_string());
+    let conversation_root = (targets.len() == 1)
+        .then(|| {
+            targets[0]
+                .scope
+                .as_ref()
+                .and_then(ConversationScope::thread_root)
+        })
+        .flatten();
+    let normalized_targets: Vec<serde_json::Value> = targets
+        .iter()
+        .map(|target| {
+            serde_json::json!({
+                "channelId": target.channel_id.to_string(),
+                "conversationRoot": target.scope.as_ref().and_then(ConversationScope::thread_root),
+            })
+        })
+        .collect();
+    observer.emit(
+        "control_result",
+        None,
+        &observer::ObserverContext {
+            channel_id,
+            session_id: None,
+            turn_id: None,
+            started_at: None,
+        },
+        serde_json::json!({
+            "type": "switch_model",
+            "requestId": request_id,
+            "status": status,
+            "modelId": model_id,
+            "conversationRoot": conversation_root,
+            "targets": normalized_targets,
+        }),
+    );
+}
+
+/// Handle one atomic `switch_model` control frame.
 ///
-/// The override is **agent-global**: it lands on every worker slot the pool
-/// holds plus the pool default, so the agent uses the new model everywhere.
-/// That is the shape the primary use case needs — escaping a rate-limited
-/// provider — and it is what buzz-acp can honestly deliver today, since
-/// `desired_model` lives on the worker process, not on the conversation.
-///
-/// What *is* conversation-scoped is the blast radius. Only the requesting
-/// conversation loses its session, so sibling threads in the same channel keep
-/// their context and pick the new model up when their own session is next
-/// created. Before BUZZ-ACP-024 this path called `invalidate_channel`, which
-/// dropped every thread session in the channel — harmless when a channel had
-/// exactly one session, destructive once BUZZ-ACP-019 gave every thread its
-/// own.
+/// The override is agent-global, while invalidation and in-flight signalling are
+/// limited to the listed conversations. Modern frames carry a `targets` array;
+/// legacy `channelId` / `conversationRoot` frames remain single-target controls.
 fn handle_switch_model_control(
     payload: &serde_json::Value,
     pool: &mut AgentPool,
     observer: Option<&observer::ObserverHandle>,
 ) {
-    let Some(channel_id) = payload
-        .get("channelId")
-        .and_then(|value| value.as_str())
-        .and_then(|value| value.parse::<Uuid>().ok())
-    else {
-        tracing::warn!("observer switch_model control frame missing valid channelId");
-        return;
-    };
     let Some(model_id) = payload.get("modelId").and_then(|value| value.as_str()) else {
         tracing::warn!("observer switch_model control frame missing modelId");
         return;
     };
-    let requested_root = payload
-        .get("conversationRoot")
-        .and_then(|value| value.as_str())
-        .filter(|root| root.len() == 64 && root.chars().all(|c| c.is_ascii_hexdigit()));
-
-    // Which conversation asked. Modern desktop frames name it. Legacy
-    // channel-only frames are accepted when the channel holds exactly one
-    // conversation — always true for a DM, and for a group channel whose only
-    // thread has a session. Anything else leaves the target unresolved: the
-    // model still lands globally, but no session is dropped, because guessing
-    // would cost an unrelated thread its context.
-    let target = match requested_root {
-        Some(root) => Some(ConversationScope::thread(channel_id, root)),
-        None => {
-            let mut scopes = pool.conversation_scopes_for_channel(channel_id);
-            if scopes.len() == 1 {
-                scopes.pop()
-            } else {
-                None
-            }
+    let request_id = payload.get("requestId").and_then(|value| value.as_str());
+    let targets = match parse_switch_model_targets(payload, pool) {
+        Ok(targets) => targets,
+        Err(()) => {
+            tracing::warn!("observer switch_model control frame has missing or invalid targets");
+            emit_switch_model_result(observer, request_id, model_id, "invalid_target", &[]);
+            return;
         }
     };
+    let target_scopes: HashSet<ConversationScope> = targets
+        .iter()
+        .filter_map(|target| target.scope.clone())
+        .collect();
+    let reachable_checked_out: HashSet<usize> = pool
+        .task_map()
+        .values()
+        .filter(|meta| {
+            meta.scope
+                .as_ref()
+                .is_some_and(|scope| target_scopes.contains(scope))
+        })
+        .map(|meta| meta.agent_index)
+        .collect();
 
-    let in_flight = pool.in_flight_scopes();
-    let target_in_flight = target
-        .as_ref()
-        .is_some_and(|scope| in_flight.contains(scope));
-    // A worker serving another conversation is checked out and unreachable: it
-    // would keep answering on the old model after the switch. Refuse rather
-    // than split the pool across models.
-    //
-    // Counted over checked-out slots rather than `task_map` scopes: the slot
-    // count is the property that actually matters — one unreachable worker is
-    // one worker too many — and it stays correct even if a slot is ever held
-    // without a matching task entry.
-    let reachable_checked_out = usize::from(target_in_flight);
-    let others_in_flight = pool.checked_out_slot_count() > reachable_checked_out;
+    // A checked-out slot outside the complete target set would keep answering
+    // on the old model. Reject the whole request before mutating or signalling.
+    if pool.checked_out_slot_count() > reachable_checked_out.len() {
+        emit_switch_model_result(
+            observer,
+            request_id,
+            model_id,
+            "other_turns_in_flight",
+            &targets,
+        );
+        return;
+    }
 
-    let status = if others_in_flight {
-        "other_turns_in_flight"
-    } else {
-        match pool.set_model_on_held_slots(model_id) {
-            IdleSwitchResult::UnsupportedModel => "unsupported_model",
-            IdleSwitchResult::CatalogUnavailable => "catalog_unavailable",
-            IdleSwitchResult::Switched | IdleSwitchResult::NoIdleAgent => {
-                match (target_in_flight, target.as_ref()) {
-                    // Busy path: the worker owns itself for the duration of its
-                    // turn, so the control oneshot is the only reachable lever.
-                    // It lands the model, then cancels and requeues its batch so
-                    // the work resumes on the new model.
-                    (true, Some(scope)) => {
-                        if signal_in_flight_conversation(
-                            pool,
-                            scope,
-                            ControlSignal::SwitchModel(model_id.to_string()),
-                        ) {
-                            "sent"
-                        } else {
-                            // Oneshot already consumed this turn by a prior
-                            // cancel/interrupt — the turn is ending anyway.
-                            "turn_ending"
-                        }
-                    }
-                    (_, Some(scope)) => {
-                        pool.invalidate_conversation_sessions(scope);
-                        "switched"
-                    }
-                    // Model landed pool-wide; nothing to invalidate, either
-                    // because the target is unresolved or it has no session yet.
-                    (_, None) => "switched",
+    let status = match pool.set_model_on_held_slots(model_id) {
+        IdleSwitchResult::UnsupportedModel => "unsupported_model",
+        IdleSwitchResult::CatalogUnavailable => "catalog_unavailable",
+        IdleSwitchResult::Switched | IdleSwitchResult::NoIdleAgent => {
+            let in_flight: HashSet<ConversationScope> =
+                pool.in_flight_scopes().into_iter().collect();
+            let mut any_in_flight = false;
+            let mut any_sent = false;
+            for target in &targets {
+                let Some(scope) = target.scope.as_ref() else {
+                    continue;
+                };
+                if in_flight.contains(scope) {
+                    any_in_flight = true;
+                    any_sent |= signal_in_flight_conversation(
+                        pool,
+                        scope,
+                        ControlSignal::SwitchModel(model_id.to_string()),
+                    );
+                } else {
+                    pool.invalidate_conversation_sessions(scope);
                 }
             }
+            if any_sent {
+                "sent"
+            } else if any_in_flight {
+                "turn_ending"
+            } else {
+                "switched"
+            }
         }
     };
 
-    if let Some(observer) = observer {
-        observer.emit(
-            "control_result",
-            None,
-            &observer::ObserverContext {
-                channel_id: Some(channel_id.to_string()),
-                session_id: None,
-                turn_id: None,
-                started_at: None,
-            },
-            serde_json::json!({
-                "type": "switch_model",
-                "status": status,
-                "modelId": model_id,
-                "conversationRoot": target.as_ref().and_then(ConversationScope::thread_root),
-            }),
-        );
-    }
+    emit_switch_model_result(observer, request_id, model_id, status, &targets);
 }
 
 /// Maximum crashes in a 60-second window before a slot's circuit opens.
@@ -7587,6 +7660,137 @@ mod error_outcome_emission_tests {
         });
     }
 
+    fn insert_switch_task(
+        pool: &mut AgentPool,
+        agent_index: usize,
+        scope: ConversationScope,
+    ) -> tokio::sync::oneshot::Receiver<ControlSignal> {
+        let (control_tx, control_rx) = tokio::sync::oneshot::channel();
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            pool::TaskMeta {
+                agent_index,
+                scope: Some(scope),
+                turn_id: format!("switch-turn-{agent_index}"),
+                recoverable_batch: None,
+                control_tx: Some(control_tx),
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+                membership_generation: 0,
+                membership_invalidated: false,
+            },
+        );
+        control_rx
+    }
+
+    #[tokio::test]
+    async fn atomic_multi_target_switch_reaches_all_listed_turns_and_rejects_an_unlisted_turn() {
+        let channel_a = Uuid::new_v4();
+        let channel_b = Uuid::new_v4();
+        let root_a = "a".repeat(64);
+        let root_b = "b".repeat(64);
+        let scope_a = ConversationScope::thread(channel_a, &root_a);
+        let scope_b = ConversationScope::thread(channel_b, &root_b);
+        let observer = ObserverHandle::in_process();
+        let mut pool = AgentPool::from_slots(vec![None, None]);
+        let receiver_a = insert_switch_task(&mut pool, 0, scope_a.clone());
+        let receiver_b = insert_switch_task(&mut pool, 1, scope_b.clone());
+
+        handle_switch_model_control(
+            &serde_json::json!({
+                "modelId": "model-next",
+                "requestId": "aggregate-success",
+                "targets": [
+                    { "channelId": channel_a.to_string(), "conversationRoot": root_a },
+                    { "channelId": channel_a.to_string(), "conversationRoot": root_a },
+                    { "channelId": channel_b.to_string(), "conversationRoot": root_b },
+                ],
+            }),
+            &mut pool,
+            Some(&observer),
+        );
+
+        let success = observer.snapshot().pop().expect("aggregate result emitted");
+        assert_eq!(success.payload["requestId"], "aggregate-success");
+        assert_eq!(success.payload["status"], "sent");
+        assert_eq!(success.payload["targets"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            receiver_a.await.unwrap(),
+            ControlSignal::SwitchModel("model-next".into())
+        );
+        assert_eq!(
+            receiver_b.await.unwrap(),
+            ControlSignal::SwitchModel("model-next".into())
+        );
+
+        let unrelated = ConversationScope::thread(Uuid::new_v4(), "c".repeat(64));
+        let observer = ObserverHandle::in_process();
+        let mut pool = AgentPool::from_slots(vec![None, None, None]);
+        let mut receiver_a = insert_switch_task(&mut pool, 0, scope_a);
+        let mut receiver_b = insert_switch_task(&mut pool, 1, scope_b);
+        let mut unrelated_receiver = insert_switch_task(&mut pool, 2, unrelated);
+
+        handle_switch_model_control(
+            &serde_json::json!({
+                "modelId": "model-next",
+                "requestId": "aggregate-rejected",
+                "targets": [
+                    { "channelId": channel_a.to_string(), "conversationRoot": root_a },
+                    { "channelId": channel_b.to_string(), "conversationRoot": root_b },
+                ],
+            }),
+            &mut pool,
+            Some(&observer),
+        );
+
+        let rejected = observer.snapshot().pop().expect("aggregate result emitted");
+        assert_eq!(rejected.payload["requestId"], "aggregate-rejected");
+        assert_eq!(rejected.payload["status"], "other_turns_in_flight");
+        assert!(receiver_a.try_recv().is_err());
+        assert!(receiver_b.try_recv().is_err());
+        assert!(unrelated_receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn invalid_multi_target_switch_fails_closed_without_session_invalidation() {
+        let target_channel = Uuid::new_v4();
+        let unrelated = ConversationScope::thread(Uuid::new_v4(), "d".repeat(64));
+        let mut agent = dummy_agent(0).await;
+        allow_model(&mut agent, "model-next");
+        agent
+            .state
+            .sessions
+            .insert(unrelated.clone(), "session-unrelated".into());
+        let mut pool = AgentPool::from_slots(vec![Some(agent)]);
+        let observer = ObserverHandle::in_process();
+
+        handle_switch_model_control(
+            &serde_json::json!({
+                "modelId": "model-next",
+                "requestId": "aggregate-invalid",
+                "targets": [
+                    { "channelId": target_channel.to_string(), "conversationRoot": "a".repeat(64) },
+                    { "channelId": "not-a-uuid" },
+                ],
+            }),
+            &mut pool,
+            Some(&observer),
+        );
+
+        let rejected = observer.snapshot().pop().expect("failure result emitted");
+        assert_eq!(rejected.payload["requestId"], "aggregate-invalid");
+        assert_eq!(rejected.payload["status"], "invalid_target");
+        assert_eq!(pool.effective_model(), None);
+        let returned = pool
+            .try_claim(Some(&unrelated))
+            .expect("unrelated session remains available");
+        assert_eq!(
+            returned.state.sessions.get(&unrelated).map(String::as_str),
+            Some("session-unrelated")
+        );
+    }
+
     #[tokio::test]
     async fn model_switch_updates_every_slot_without_dropping_sessions() {
         let channel_id = Uuid::new_v4();
@@ -7725,6 +7929,33 @@ mod error_outcome_emission_tests {
             Some("session-sibling"),
             "sibling thread must survive a switch aimed at another thread"
         );
+    }
+
+    #[tokio::test]
+    async fn switch_model_control_result_echoes_request_id() {
+        let channel_id = Uuid::new_v4();
+        let target_root = "a".repeat(64);
+        let target = ConversationScope::thread(channel_id, &target_root);
+        let mut agent = dummy_agent(0).await;
+        allow_model(&mut agent, "model-next");
+        agent.state.sessions.insert(target, "session-target".into());
+        let mut pool = AgentPool::from_slots(vec![Some(agent)]);
+        let observer = ObserverHandle::in_process();
+
+        handle_switch_model_control(
+            &serde_json::json!({
+                "channelId": channel_id.to_string(),
+                "modelId": "model-next",
+                "conversationRoot": target_root,
+                "requestId": "switch-request-1",
+            }),
+            &mut pool,
+            Some(&observer),
+        );
+
+        let event = observer.snapshot().pop().expect("control result emitted");
+        assert_eq!(event.kind, "control_result");
+        assert_eq!(event.payload["requestId"], "switch-request-1");
     }
 
     /// An unknown model must be rejected before anything is mutated — the

@@ -44,6 +44,7 @@ function asTokenNumber(value: unknown): number | null {
 export function foldChannelTurnMetrics(
   channelId: string,
   rows: readonly unknown[],
+  threadRoot: string | null = null,
 ): ChannelContextUsage {
   let model: string | null = null;
   let lastInputTokens: number | null = null;
@@ -53,6 +54,13 @@ export function foldChannelTurnMetrics(
   for (const raw of rows) {
     const payload: TurnMetricPayload | null = asTurnMetric(raw);
     if (!payload || payload.channelId !== channelId) continue;
+    if (
+      threadRoot !== null &&
+      payload.threadRoot != null &&
+      payload.threadRoot !== threadRoot
+    ) {
+      continue;
+    }
     reportCount += 1;
 
     if (payload.model && model == null) model = payload.model;
@@ -84,12 +92,13 @@ export function foldChannelTurnMetrics(
 export function useChannelContextUsage(
   channelId: string | null | undefined,
   currentPubkey: string | null | undefined,
+  threadRoot: string | null = null,
 ): ChannelContextUsage | null {
   const archive = useContextUsageArchive(currentPubkey);
 
   return React.useMemo(() => {
     if (!channelId || !archive.data || archive.data.length === 0) return null;
-    const folded = foldChannelTurnMetrics(channelId, archive.data);
+    const folded = foldChannelTurnMetrics(channelId, archive.data, threadRoot);
     return folded.reportCount > 0 ? folded : null;
-  }, [channelId, archive.data]);
+  }, [channelId, threadRoot, archive.data]);
 }
