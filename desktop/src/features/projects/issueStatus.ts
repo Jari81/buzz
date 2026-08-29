@@ -59,6 +59,86 @@ export const ISSUE_LIFECYCLE_STATUSES: ProjectIssueLifecycleStatus[] = [
   "closed",
 ];
 
+export function availableProjectIssueLifecycleStatuses(
+  hasCurrentReview: boolean,
+): ProjectIssueLifecycleStatus[] {
+  return hasCurrentReview
+    ? ISSUE_LIFECYCLE_STATUSES.filter((status) => status !== "resolved")
+    : ISSUE_LIFECYCLE_STATUSES;
+}
+
+export type ProjectIssueHumanVerdict = "accepted" | "rejected";
+
+export const MAX_REJECTION_REASON_LENGTH = 500;
+
+function hasControlCharacters(value: string): boolean {
+  return [...value].some((character) => {
+    const code = character.charCodeAt(0);
+    return code <= 31 || code === 127;
+  });
+}
+
+export function buildProjectIssueVerdict({
+  issue,
+  project,
+  reason,
+  verdict,
+}: {
+  issue: Pick<ProjectIssue, "author" | "id" | "currentReview">;
+  project: Pick<Project, "owner" | "repoAddress">;
+  reason?: string;
+  verdict: ProjectIssueHumanVerdict;
+}): { content: string; kind: number; tags: string[][] } {
+  const reviewId = issue.currentReview?.id;
+  const reviewRootId = issue.currentReview?.rootId;
+  if (!reviewId || !reviewRootId) {
+    throw new Error("A current review with its bound root is required.");
+  }
+  if (issue.currentReview?.verdict) {
+    throw new Error("A verdict was already sent for the current review.");
+  }
+  const content = reason?.trim() ?? "";
+  if (
+    verdict === "rejected" &&
+    (!content ||
+      content.length > MAX_REJECTION_REASON_LENGTH ||
+      hasControlCharacters(content))
+  ) {
+    throw new Error(
+      `A concrete, control-character-free rejection reason of at most ${MAX_REJECTION_REASON_LENGTH} characters is required.`,
+    );
+  }
+  return {
+    kind:
+      verdict === "accepted" ? KIND_GIT_STATUS_MERGED : KIND_GIT_STATUS_OPEN,
+    content: verdict === "rejected" ? content : "",
+    tags: [
+      ["e", issue.id, "", "root"],
+      ["a", project.repoAddress],
+      ...[
+        ...new Set([project.owner.toLowerCase(), issue.author.toLowerCase()]),
+      ].map((recipient) => ["p", recipient]),
+      ["t", "human-verdict"],
+      ["verdict", verdict],
+      ["review", reviewId],
+      ["review-root", reviewRootId],
+    ],
+  };
+}
+
+export function canSubmitProjectIssueVerdict(
+  issue: Pick<ProjectIssue, "currentReview">,
+  viewer: string | null,
+): boolean {
+  return Boolean(
+    viewer &&
+      !issue.currentReview?.verdict &&
+      issue.currentReview?.authorizedHumanPubkeys.some(
+        (pubkey) => pubkey === viewer.toLowerCase(),
+      ),
+  );
+}
+
 /** The issue author, the repo owner, and anyone assigned to the issue are
  * trusted for status changes. A managed-agent owner counts as the owner
  * because the desktop can sign on its behalf. Assignees are the ticket's
@@ -142,6 +222,54 @@ async function updateProjectIssueStatus({
     "Timed out updating issue status.",
     "Failed to update issue status.",
   );
+}
+
+async function submitProjectIssueVerdict({
+  issue,
+  project,
+  reason,
+  verdict,
+}: {
+  issue: ProjectIssue;
+  project: Project;
+  reason?: string;
+  verdict: ProjectIssueHumanVerdict;
+}): Promise<void> {
+  const verdictEvent = buildProjectIssueVerdict({
+    issue,
+    project,
+    reason,
+    verdict,
+  });
+  const event = await signRelayEvent({
+    ...verdictEvent,
+    createdAt: nextProjectIssueStatusCreatedAt(
+      issue,
+      Math.floor(Date.now() / 1_000),
+    ),
+  });
+  await relayClient.publishEvent(
+    event,
+    "Timed out sending human verdict.",
+    "Failed to send human verdict.",
+  );
+}
+
+export function useSubmitProjectIssueVerdictMutation(
+  project: Project | null | undefined,
+) {
+  const invalidate = useProjectIssueWriteInvalidation(project);
+  return useMutation({
+    mutationFn: (input: {
+      issue: ProjectIssue;
+      reason?: string;
+      verdict: ProjectIssueHumanVerdict;
+    }) => {
+      if (!project) throw new Error("No project selected.");
+      return submitProjectIssueVerdict({ ...input, project });
+    },
+    onSuccess: invalidate,
+  });
 }
 
 export function useUpdateProjectIssueStatusMutation(

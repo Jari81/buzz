@@ -77,6 +77,7 @@ function latestStatusForIssue(
     .filter(
       (event) =>
         allowedActors.has(event.pubkey.toLowerCase()) &&
+        !getAllTags(event, "t").includes("human-verdict") &&
         event.tags.some((tag) => tag[0] === "e" && tag[1] === issue.id),
     )
     .sort((left, right) => right.created_at - left.created_at)[0];
@@ -88,13 +89,6 @@ function statusFromEvent(issue, statusEvent) {
   // NIP-34 calls 1633 "Draft"; we surface it as Triage for issues. The
   // label-based fallbacks below are client-side heuristics, not protocol.
   if (statusEvent?.kind === 1633) return PROJECT_ISSUE_STATUS.TRIAGE;
-
-  // Review-ready is verified workflow evidence on the mutable NIP-34 status
-  // event. It must override the immutable root's historic `approved` decision
-  // label: approval admitted work to the queue, it did not complete review.
-  if (/\breview[- ]ready\b/i.test(statusEvent?.content ?? "")) {
-    return PROJECT_ISSUE_STATUS.IN_REVIEW;
-  }
 
   const labels = [
     ...getAllTags(issue, "t"),
@@ -196,17 +190,323 @@ function assignmentStateForIssue(issue, issueCommentEvents) {
 }
 
 function commentsForIssue(issueCommentEvents) {
-  return sortEvents(issueCommentEvents).map((event) => ({
-    id: event.id,
-    content: event.content,
-    tags: getImetaTags(event),
-    author: event.pubkey,
-    createdAt: event.created_at,
-    recipients: getAllTags(event, "p"),
-    actionRequired: getAllTags(event, "t").includes(
-      ISSUE_ACTION_REQUIRED_LABEL,
+  return sortEvents(issueCommentEvents)
+    .filter((event) => {
+      const labels = getAllTags(event, "t");
+      return (
+        !labels.includes("review-ready") &&
+        !labels.includes("issue-verdict-confirmed")
+      );
+    })
+    .map((event) => ({
+      id: event.id,
+      content: event.content,
+      tags: getImetaTags(event),
+      author: event.pubkey,
+      createdAt: event.created_at,
+      recipients: getAllTags(event, "p"),
+      actionRequired: getAllTags(event, "t").includes(
+        ISSUE_ACTION_REQUIRED_LABEL,
+      ),
+    }));
+}
+
+function exactTag(event, name, value) {
+  return event.tags.some(
+    (tag) =>
+      tag.length === value.length + 1 &&
+      tag[0] === name &&
+      value.every((part, index) => tag[index + 1] === part),
+  );
+}
+
+function exactlyOneTag(event, name, value) {
+  return (
+    event.tags.filter((tag) => tag[0] === name).length === 1 &&
+    exactTag(event, name, value)
+  );
+}
+
+function singleTagValue(event, name) {
+  const tags = event.tags.filter((tag) => tag[0] === name);
+  return tags.length === 1 &&
+    tags[0].length === 2 &&
+    isNonEmptyString(tags[0][1])
+    ? tags[0][1]
+    : null;
+}
+
+function normalizedConfiguredPubkeys(pubkeys) {
+  if (!Array.isArray(pubkeys) || pubkeys.length === 0) return [];
+  if (pubkeys.some((pubkey) => !/^[0-9a-f]{64}$/.test(pubkey))) return [];
+  return new Set(pubkeys).size === pubkeys.length ? [...pubkeys] : [];
+}
+
+function exactContentFields(content, header, expectedNames) {
+  const lines = content.split("\n");
+  if (lines[0] !== header || lines.length !== expectedNames.length + 1) {
+    return null;
+  }
+  const fields = new Map();
+  for (const line of lines.slice(1)) {
+    const separator = line.indexOf(": ");
+    if (separator <= 0) return null;
+    const name = line.slice(0, separator);
+    const value = line.slice(separator + 2);
+    if (!expectedNames.includes(name) || !value || fields.has(name))
+      return null;
+    fields.set(name, value);
+  }
+  return fields.size === expectedNames.length ? fields : null;
+}
+
+function reviewContent(event, reviewId) {
+  const fields = exactContentFields(event.content, "[REVIEW-READY]", [
+    "Review-ID",
+    "Target",
+    "Evidence",
+    "Test",
+    "Known limitations",
+  ]);
+  if (!fields || fields.get("Review-ID") !== reviewId) return null;
+  return {
+    target: fields.get("Target"),
+    evidence: fields.get("Evidence"),
+    test: fields.get("Test"),
+    limitations: fields.get("Known limitations"),
+  };
+}
+
+function exactRecipientSet(event, expectedRecipients) {
+  const recipientTags = event.tags.filter((tag) => tag[0] === "p");
+  if (recipientTags.length !== expectedRecipients.size) return false;
+  const recipients = recipientTags.map((tag) =>
+    tag.length === 2 && /^[0-9a-f]{64}$/.test(tag[1] ?? "") ? tag[1] : null,
+  );
+  return (
+    recipients.every(Boolean) &&
+    new Set(recipients).size === recipients.length &&
+    recipients.every((recipient) => expectedRecipients.has(recipient))
+  );
+}
+
+function descendingEventOrder(left, right) {
+  return right.created_at - left.created_at || right.id.localeCompare(left.id);
+}
+
+function currentReviewForIssue(issue, issueCommentEvents, reviewAuthority) {
+  const repoAddress = getTag(issue, "a");
+  const coordinators = normalizedConfiguredPubkeys(
+    reviewAuthority?.coordinatorPubkeys,
+  );
+  const humans = normalizedConfiguredPubkeys(reviewAuthority?.humanPubkeys);
+  if (
+    !repoAddress ||
+    !repoOwnerFromAddress(repoAddress) ||
+    coordinators.length === 0 ||
+    humans.length !== 2
+  ) {
+    return null;
+  }
+  const expectedHumans = new Set(humans);
+  const candidates = issueCommentEvents
+    .filter(
+      (event) =>
+        event.kind === 1 &&
+        coordinators.includes(event.pubkey) &&
+        event.tags.some((tag) => tag[0] === "t" && tag[1] === "review-ready"),
+    )
+    .sort(descendingEventOrder);
+  const marker = candidates[0];
+  if (
+    !marker ||
+    !/^[0-9a-f]{64}$/.test(marker.id) ||
+    marker.created_at < issue.created_at
+  ) {
+    return null;
+  }
+  if (
+    !exactlyOneTag(marker, "e", [issue.id, "", "root"]) ||
+    !exactlyOneTag(marker, "a", [repoAddress]) ||
+    !exactlyOneTag(marker, "t", ["review-ready"]) ||
+    !exactRecipientSet(marker, expectedHumans)
+  ) {
+    return null;
+  }
+  const id = singleTagValue(marker, "review");
+  const rootId = singleTagValue(marker, "review-root");
+  const content = id ? reviewContent(marker, id) : null;
+  if (!id || !rootId || !/^[0-9a-f]{64}$/.test(rootId) || !content) {
+    return null;
+  }
+  if (
+    candidates.some(
+      (candidate, index) =>
+        index > 0 && singleTagValue(candidate, "review") === id,
+    )
+  ) {
+    return null;
+  }
+  return {
+    marker,
+    coordinators,
+    review: {
+      id,
+      rootId,
+      ...content,
+      authorizedHumanPubkeys: humans,
+      verdict: null,
+    },
+  };
+}
+
+function hasControlCharacters(value) {
+  return [...value].some((character) => {
+    const code = character.charCodeAt(0);
+    return code <= 31 || code === 127;
+  });
+}
+
+function humanVerdictForCurrentReview(
+  issue,
+  statusEvents,
+  currentReviewBinding,
+) {
+  if (!currentReviewBinding) return null;
+  const { marker, review } = currentReviewBinding;
+  const repoAddress = getTag(issue, "a");
+  const authorizedHumans = new Set(review.authorizedHumanPubkeys);
+  const expectedRecipients = new Set(
+    [repoOwnerFromAddress(repoAddress), issue.pubkey.toLowerCase()].filter(
+      Boolean,
     ),
-  }));
+  );
+  return (
+    statusEvents
+      .filter((event) => {
+        const verdict = singleTagValue(event, "verdict");
+        if (
+          !/^[0-9a-f]{64}$/.test(event.id) ||
+          !authorizedHumans.has(event.pubkey) ||
+          event.created_at < marker.created_at ||
+          !exactlyOneTag(event, "e", [issue.id, "", "root"]) ||
+          !exactlyOneTag(event, "a", [repoAddress]) ||
+          !exactlyOneTag(event, "t", ["human-verdict"]) ||
+          !exactlyOneTag(event, "review", [review.id]) ||
+          !exactlyOneTag(event, "review-root", [review.rootId]) ||
+          !exactRecipientSet(event, expectedRecipients)
+        ) {
+          return false;
+        }
+        if (event.kind === 1631 && verdict === "accepted") {
+          return event.content === "";
+        }
+        return (
+          event.kind === 1630 &&
+          verdict === "rejected" &&
+          event.content.length > 0 &&
+          event.content.length <= 500 &&
+          event.content.trim() === event.content &&
+          !hasControlCharacters(event.content)
+        );
+      })
+      .sort(
+        (left, right) =>
+          left.created_at - right.created_at || left.id.localeCompare(right.id),
+      )[0] ?? null
+  );
+}
+
+function confirmationContent(event, issue, review, rawVerdict, kanbanStatus) {
+  const verdict = singleTagValue(rawVerdict, "verdict");
+  const expectedNames = [
+    "Issue",
+    "Repository",
+    "Board",
+    "Task",
+    "Review",
+    "Review-Root",
+    "Verdict-Event",
+    "Actor",
+    "Verdict",
+    "Kanban-Status",
+    ...(verdict === "rejected" ? ["Reason"] : []),
+  ];
+  const fields = exactContentFields(
+    event.content,
+    "[ISSUE-VERDICT-CONFIRMED]",
+    expectedNames,
+  );
+  if (!fields) return false;
+  return (
+    fields.get("Issue") === issue.id &&
+    fields.get("Repository") === getTag(issue, "a") &&
+    fields.get("Review") === review.id &&
+    fields.get("Review-Root") === review.rootId &&
+    fields.get("Verdict-Event") === rawVerdict.id &&
+    fields.get("Actor") === rawVerdict.pubkey &&
+    fields.get("Verdict") === verdict &&
+    fields.get("Kanban-Status") === kanbanStatus &&
+    Boolean(fields.get("Board")) &&
+    Boolean(fields.get("Task")) &&
+    (verdict === "accepted"
+      ? !fields.has("Reason")
+      : fields.get("Reason") === rawVerdict.content)
+  );
+}
+
+function confirmationForCurrentVerdict(
+  issue,
+  issueCommentEvents,
+  currentReviewBinding,
+  rawVerdict,
+) {
+  if (!currentReviewBinding || !rawVerdict) return null;
+  const { coordinators, marker, review } = currentReviewBinding;
+  const verdict = singleTagValue(rawVerdict, "verdict");
+  const allowedKanbanStatuses =
+    verdict === "accepted" ? new Set(["done"]) : new Set(["ready", "todo"]);
+  const candidates = issueCommentEvents.filter(
+    (event) =>
+      event.kind === 1 &&
+      coordinators.includes(event.pubkey) &&
+      event.created_at >= marker.created_at &&
+      event.tags.some(
+        (tag) => tag[0] === "t" && tag[1] === "issue-verdict-confirmed",
+      ),
+  );
+  if (candidates.length !== 1) return null;
+  const confirmations = candidates.filter((event) => {
+    if (
+      !/^[0-9a-f]{64}$/.test(event.id) ||
+      event.created_at < rawVerdict.created_at ||
+      !exactlyOneTag(event, "e", [issue.id, "", "root"]) ||
+      !exactlyOneTag(event, "a", [getTag(issue, "a")]) ||
+      !exactlyOneTag(event, "t", ["issue-verdict-confirmed"]) ||
+      !exactlyOneTag(event, "review", [review.id]) ||
+      !exactlyOneTag(event, "review-root", [review.rootId]) ||
+      !exactlyOneTag(event, "verdict", [verdict]) ||
+      !exactlyOneTag(event, "verdict-event", [rawVerdict.id]) ||
+      !exactRecipientSet(event, new Set([rawVerdict.pubkey]))
+    ) {
+      return false;
+    }
+    const kanbanStatus = singleTagValue(event, "kanban-status");
+    return (
+      allowedKanbanStatuses.has(kanbanStatus) &&
+      confirmationContent(event, issue, review, rawVerdict, kanbanStatus)
+    );
+  });
+  if (confirmations.length !== 1) return null;
+  const event = confirmations[0];
+  return {
+    event,
+    model: {
+      eventId: event.id,
+      createdAt: event.created_at,
+      kanbanStatus: singleTagValue(event, "kanban-status"),
+    },
+  };
 }
 
 export function eventToProjectIssue(
@@ -214,6 +514,7 @@ export function eventToProjectIssue(
   statusEvents = [],
   commentEvents = [],
   additionalStatusActors = [],
+  reviewAuthority,
 ) {
   const issueCommentEvents = commentEvents.filter((event) =>
     event.tags.some(
@@ -230,6 +531,63 @@ export function eventToProjectIssue(
     assignmentState.assignees,
     additionalStatusActors,
   );
+  const currentReviewBinding = currentReviewForIssue(
+    issue,
+    issueCommentEvents,
+    reviewAuthority,
+  );
+  const rawVerdict = humanVerdictForCurrentReview(
+    issue,
+    statusEvents,
+    currentReviewBinding,
+  );
+  const confirmation = confirmationForCurrentVerdict(
+    issue,
+    issueCommentEvents,
+    currentReviewBinding,
+    rawVerdict,
+  );
+  const currentReview = currentReviewBinding
+    ? {
+        ...currentReviewBinding.review,
+        verdict: rawVerdict
+          ? {
+              eventId: rawVerdict.id,
+              kind: singleTagValue(rawVerdict, "verdict"),
+              actorPubkey: rawVerdict.pubkey,
+              createdAt: rawVerdict.created_at,
+              reason: rawVerdict.kind === 1630 ? rawVerdict.content : null,
+              confirmation: confirmation?.model ?? null,
+            }
+          : null,
+      }
+    : null;
+  const confirmedVerdict = currentReview?.verdict?.confirmation
+    ? currentReview.verdict.kind
+    : null;
+  const latestLifecycleAfterMarker =
+    latestStatus &&
+    currentReviewBinding &&
+    latestStatus.created_at > currentReviewBinding.marker.created_at
+      ? latestStatus
+      : null;
+  const status =
+    confirmedVerdict === "accepted"
+      ? PROJECT_ISSUE_STATUS.DONE
+      : confirmedVerdict === "rejected"
+        ? PROJECT_ISSUE_STATUS.BACKLOG
+        : currentReview
+          ? latestLifecycleAfterMarker?.kind === 1631 ||
+            !latestLifecycleAfterMarker
+            ? PROJECT_ISSUE_STATUS.IN_REVIEW
+            : statusFromEvent(issue, latestLifecycleAfterMarker)
+          : statusFromEvent(issue, latestStatus);
+  const effectiveStatus =
+    confirmation?.event ??
+    rawVerdict ??
+    (currentReviewBinding
+      ? (latestStatus ?? currentReviewBinding.marker)
+      : latestStatus);
   const comments = commentsForIssue(issueCommentEvents);
   const title =
     getTag(issue, "subject") ||
@@ -250,15 +608,16 @@ export function eventToProjectIssue(
     recipients: getAllTags(issue, "p"),
     assignees: assignmentState.assignees,
     assigneeOperationHeads: assignmentState.heads,
-    status: statusFromEvent(issue, latestStatus),
-    statusEventId: latestStatus?.id ?? null,
-    statusCreatedAt: latestStatus?.created_at ?? null,
+    status,
+    statusEventId: effectiveStatus?.id ?? null,
+    statusCreatedAt: effectiveStatus?.created_at ?? null,
     updatedAt:
       [
         ...comments,
-        ...(latestStatus ? [{ createdAt: latestStatus.created_at }] : []),
+        ...(effectiveStatus ? [{ createdAt: effectiveStatus.created_at }] : []),
       ].sort((left, right) => right.createdAt - left.createdAt)[0]?.createdAt ??
       issue.created_at,
+    currentReview,
     comments,
   };
 }
@@ -268,6 +627,7 @@ export function projectIssueEventsToIssues(
   statusEvents = [],
   commentEvents = [],
   additionalStatusActors = [],
+  reviewAuthority,
 ) {
   return [...issueEvents]
     .map((issue) =>
@@ -276,6 +636,7 @@ export function projectIssueEventsToIssues(
         statusEvents,
         commentEvents,
         additionalStatusActors,
+        reviewAuthority,
       ),
     )
     .sort((left, right) => right.updatedAt - left.updatedAt);

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { buildProjectReadModels } from "./projectModels.ts";
 import { fetchProjectsWorkItems } from "./projectWorkItems.ts";
 
 // ── Work-item deduplication ─────────────────────────────────────────────────
@@ -12,6 +13,8 @@ import { fetchProjectsWorkItems } from "./projectWorkItems.ts";
 // end-to-end, not just the filter algorithm in isolation.
 
 const REPO_OWNER = "a".repeat(64);
+const REVIEW_TESTER = "b".repeat(64);
+const REVIEW_COORDINATOR = "c".repeat(64);
 const REPO_DTAG = "relay";
 const REPO_ADDRESS = `30617:${REPO_OWNER}:${REPO_DTAG}`;
 
@@ -86,6 +89,64 @@ test("fetchProjectsWorkItems deduplicates issues from a shared repository", asyn
     "duplicate issue from shared repo must collapse to one row",
   );
   assert.equal(result.issues.items[0].issue.id, ISSUE_ID);
+});
+
+test("fetchProjectsWorkItems threads project review authority into issue reduction", async () => {
+  const issue = makeIssue(ISSUE_ID);
+  const reviewId = "buzz-workflow:t_1:revision";
+  const marker = {
+    id: "3".repeat(64),
+    kind: 1,
+    pubkey: REVIEW_COORDINATOR,
+    created_at: 250,
+    content: `[REVIEW-READY]\nReview-ID: ${reviewId}\nTarget: immutable-target\nEvidence: focused tests\nTest: open the issue\nKnown limitations: none`,
+    tags: [
+      ["e", ISSUE_ID, "", "root"],
+      ["a", REPO_ADDRESS],
+      ["t", "review-ready"],
+      ["review", reviewId],
+      ["review-root", "2".repeat(64)],
+      ["p", REPO_OWNER],
+      ["p", REVIEW_TESTER],
+    ],
+  };
+  const repositoryEvent = {
+    id: "1".repeat(64),
+    kind: 30617,
+    pubkey: REPO_OWNER,
+    created_at: 200,
+    content: "",
+    tags: [["d", REPO_DTAG]],
+  };
+  const projectEvent = {
+    id: "2".repeat(64),
+    kind: 30621,
+    pubkey: REPO_OWNER,
+    created_at: 220,
+    content: "",
+    tags: [
+      ["d", "workflow"],
+      ["a", REPO_ADDRESS],
+      ["review-coordinator", REVIEW_COORDINATOR],
+      ["review-human", REPO_OWNER],
+      ["review-human", REVIEW_TESTER],
+    ],
+  };
+  const [project] = buildProjectReadModels({
+    projectEvents: [projectEvent],
+    repositoryEvents: [repositoryEvent],
+  });
+  assert.ok(project);
+  const fetchEvents = async (filter) => {
+    if (filter.kinds?.includes(1621)) return [issue];
+    if (filter.kinds?.includes(1)) return [marker];
+    return [];
+  };
+
+  const result = await fetchProjectsWorkItems([project], fetchEvents);
+
+  assert.equal(result.issues.items[0].issue.currentReview?.id, reviewId);
+  assert.equal(result.issues.items[0].issue.status, "In Review");
 });
 
 test("fetchProjectsWorkItems deduplicates pull requests from a shared repository", async () => {

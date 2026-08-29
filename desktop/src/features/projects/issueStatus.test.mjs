@@ -2,9 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  availableProjectIssueLifecycleStatuses,
+  buildProjectIssueVerdict,
+  canSubmitProjectIssueVerdict,
   canChangeProjectIssueStatus,
   ISSUE_LIFECYCLE_STATUS_LABEL,
   ISSUE_LIFECYCLE_STATUSES,
+  MAX_REJECTION_REASON_LENGTH,
 } from "./issueStatus.ts";
 
 const OWNER = "a".repeat(64);
@@ -28,12 +32,152 @@ test("every publishable lifecycle state maps to the label the read path derives"
   );
 });
 
+test("current review removes generic resolved from the lifecycle picker", () => {
+  assert.deepEqual(availableProjectIssueLifecycleStatuses(true), [
+    "draft",
+    "open",
+    "closed",
+  ]);
+  assert.deepEqual(availableProjectIssueLifecycleStatuses(false), [
+    "draft",
+    "open",
+    "resolved",
+    "closed",
+  ]);
+});
+
 test("label-driven states are not offered as publishable statuses", () => {
   const labels = ISSUE_LIFECYCLE_STATUSES.map(
     (status) => ISSUE_LIFECYCLE_STATUS_LABEL[status],
   );
   assert.equal(labels.includes("In Progress"), false);
   assert.equal(labels.includes("In Review"), false);
+});
+
+test("builds exact personal-signed human verdict contracts", () => {
+  const issue = {
+    author: AUTHOR,
+    currentReview: { id: "review-42", rootId: "review-root-42" },
+    id: "f".repeat(64),
+  };
+  const project = { owner: OWNER, repoAddress: `30617:${OWNER}:demo` };
+
+  assert.deepEqual(
+    buildProjectIssueVerdict({ issue, project, verdict: "accepted" }),
+    {
+      content: "",
+      kind: 1631,
+      tags: [
+        ["e", issue.id, "", "root"],
+        ["a", project.repoAddress],
+        ["p", OWNER],
+        ["p", AUTHOR],
+        ["t", "human-verdict"],
+        ["verdict", "accepted"],
+        ["review", "review-42"],
+        ["review-root", "review-root-42"],
+      ],
+    },
+  );
+  assert.deepEqual(
+    buildProjectIssueVerdict({
+      issue,
+      project,
+      reason: "The target does not load.",
+      verdict: "rejected",
+    }),
+    {
+      content: "The target does not load.",
+      kind: 1630,
+      tags: [
+        ["e", issue.id, "", "root"],
+        ["a", project.repoAddress],
+        ["p", OWNER],
+        ["p", AUTHOR],
+        ["t", "human-verdict"],
+        ["verdict", "rejected"],
+        ["review", "review-42"],
+        ["review-root", "review-root-42"],
+      ],
+    },
+  );
+  assert.throws(
+    () =>
+      buildProjectIssueVerdict({
+        issue,
+        project,
+        reason: "bad\nreason",
+        verdict: "rejected",
+      }),
+    /reason/i,
+  );
+});
+
+test("human verdict recipients are the deduped exact owner and author set", () => {
+  const issue = {
+    author: OWNER,
+    currentReview: { id: "review-42", rootId: "1".repeat(64) },
+    id: "f".repeat(64),
+  };
+  const project = { owner: OWNER, repoAddress: `30617:${OWNER}:demo` };
+
+  const verdict = buildProjectIssueVerdict({
+    issue,
+    project,
+    verdict: "accepted",
+  });
+  assert.deepEqual(
+    verdict.tags.filter((tag) => tag[0] === "p"),
+    [["p", OWNER]],
+  );
+  assert.equal(verdict.content, "");
+});
+
+test("rejection reasons enforce the exact 500-character contract", () => {
+  assert.equal(MAX_REJECTION_REASON_LENGTH, 500);
+  const issue = {
+    author: AUTHOR,
+    currentReview: { id: "review-42", rootId: "1".repeat(64) },
+    id: "f".repeat(64),
+  };
+  const project = { owner: OWNER, repoAddress: `30617:${OWNER}:demo` };
+
+  assert.equal(
+    buildProjectIssueVerdict({
+      issue,
+      project,
+      reason: "x".repeat(500),
+      verdict: "rejected",
+    }).content.length,
+    500,
+  );
+  assert.throws(
+    () =>
+      buildProjectIssueVerdict({
+        issue,
+        project,
+        reason: "x".repeat(501),
+        verdict: "rejected",
+      }),
+    /500/,
+  );
+});
+
+test("only configured human verdict actors may submit a current review", () => {
+  const issue = {
+    currentReview: { authorizedHumanPubkeys: [OWNER, OA_OWNER] },
+  };
+  assert.equal(canSubmitProjectIssueVerdict(issue, OWNER), true);
+  assert.equal(
+    canSubmitProjectIssueVerdict(issue, OA_OWNER.toUpperCase()),
+    true,
+  );
+  assert.equal(canSubmitProjectIssueVerdict(issue, ASSIGNEE), false);
+  assert.equal(canSubmitProjectIssueVerdict(issue, null), false);
+  assert.equal(
+    canSubmitProjectIssueVerdict({ currentReview: null }, OWNER),
+    false,
+  );
 });
 
 test("issue author and repo owner may change status", () => {

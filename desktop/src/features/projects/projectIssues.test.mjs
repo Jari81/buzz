@@ -19,6 +19,10 @@ const OWNER = "a".repeat(64);
 const AUTHOR = "b".repeat(64);
 const ATTACKER = "c".repeat(64);
 const OA_OWNER = "d".repeat(64);
+const REVIEW_TESTER = "f".repeat(64);
+const REVIEW_COORDINATOR = "1".repeat(64);
+const REVIEW_ID = "buzz-workflow:t_1:revision";
+const REVIEW_ROOT_ID = "2".repeat(64);
 const REPO_ADDRESS = `30617:${OWNER}:demo`;
 
 function issueEvent(overrides = {}) {
@@ -76,6 +80,98 @@ function assignmentComment(
     ],
   };
 }
+
+function currentReviewMarker() {
+  return {
+    id: "3".repeat(64),
+    kind: 1,
+    pubkey: REVIEW_COORDINATOR,
+    created_at: 250,
+    content: `[REVIEW-READY]\nReview-ID: ${REVIEW_ID}\nTarget: immutable-target\nEvidence: focused tests\nTest: open the issue\nKnown limitations: none`,
+    tags: [
+      ["e", "e".repeat(64), "", "root"],
+      ["a", REPO_ADDRESS],
+      ["t", "review-ready"],
+      ["review", REVIEW_ID],
+      ["review-root", REVIEW_ROOT_ID],
+      ["p", OWNER],
+      ["p", REVIEW_TESTER],
+    ],
+  };
+}
+
+function acceptedReviewVerdict(overrides = {}) {
+  return {
+    id: "4".repeat(64),
+    kind: 1631,
+    pubkey: REVIEW_TESTER,
+    created_at: 300,
+    content: "",
+    tags: [
+      ["e", "e".repeat(64), "", "root"],
+      ["a", REPO_ADDRESS],
+      ["p", OWNER],
+      ["p", AUTHOR],
+      ["t", "human-verdict"],
+      ["verdict", "accepted"],
+      ["review", REVIEW_ID],
+      ["review-root", REVIEW_ROOT_ID],
+    ],
+    ...overrides,
+  };
+}
+
+function rejectedReviewVerdict(overrides = {}) {
+  return {
+    id: "5".repeat(64),
+    kind: 1630,
+    pubkey: OWNER,
+    created_at: 300,
+    content: "The target does not load.",
+    tags: [
+      ["e", "e".repeat(64), "", "root"],
+      ["a", REPO_ADDRESS],
+      ["p", OWNER],
+      ["p", AUTHOR],
+      ["t", "human-verdict"],
+      ["verdict", "rejected"],
+      ["review", REVIEW_ID],
+      ["review-root", REVIEW_ROOT_ID],
+    ],
+    ...overrides,
+  };
+}
+
+function reviewConfirmation(rawVerdict, overrides = {}) {
+  const verdict = rawVerdict.tags.find((tag) => tag[0] === "verdict")[1];
+  const kanbanStatus = verdict === "accepted" ? "done" : "ready";
+  const reason =
+    verdict === "rejected" ? `\nReason: ${rawVerdict.content}` : "";
+  return {
+    id: "6".repeat(64),
+    kind: 1,
+    pubkey: REVIEW_COORDINATOR,
+    created_at: 350,
+    content: `[ISSUE-VERDICT-CONFIRMED]\nIssue: ${"e".repeat(64)}\nRepository: ${REPO_ADDRESS}\nBoard: buzz-workflow\nTask: t_1\nReview: ${REVIEW_ID}\nReview-Root: ${REVIEW_ROOT_ID}\nVerdict-Event: ${rawVerdict.id}\nActor: ${rawVerdict.pubkey}\nVerdict: ${verdict}\nKanban-Status: ${kanbanStatus}${reason}`,
+    tags: [
+      ["e", "e".repeat(64), "", "root"],
+      ["a", REPO_ADDRESS],
+      ["t", "issue-verdict-confirmed"],
+      ["review", REVIEW_ID],
+      ["review-root", REVIEW_ROOT_ID],
+      ["verdict", verdict],
+      ["verdict-event", rawVerdict.id],
+      ["kanban-status", kanbanStatus],
+      ["p", rawVerdict.pubkey],
+    ],
+    ...overrides,
+  };
+}
+
+const REVIEW_AUTHORITY = {
+  coordinatorPubkeys: [REVIEW_COORDINATOR],
+  humanPubkeys: [OWNER, REVIEW_TESTER],
+};
 
 test("ignores status events from a different pubkey", () => {
   const attackerClosed = statusEvent({
@@ -233,7 +329,7 @@ test("preserves root and comment tags for rich content rendering", () => {
   assert.deepEqual(issue.comments[0].tags, [comment.tags[1]]);
 });
 
-test("renders a review-ready status event ahead of an immutable approved decision label", () => {
+test("does not infer a review from status-event prose", () => {
   const root = issueEvent({
     tags: [
       ["a", REPO_ADDRESS],
@@ -248,7 +344,355 @@ test("renders a review-ready status event ahead of an immutable approved decisio
 
   assert.equal(
     eventToProjectIssue(root, [reviewReady]).status,
-    PROJECT_ISSUE_STATUS.IN_REVIEW,
+    PROJECT_ISSUE_STATUS.APPROVED,
+  );
+});
+
+test("parses a trusted review-ready marker into the current review model", () => {
+  const TESTER = "f".repeat(64);
+  const COORDINATOR = "1".repeat(64);
+  const marker = {
+    id: "3".repeat(64),
+    kind: 1,
+    pubkey: COORDINATOR,
+    created_at: 250,
+    content:
+      "[REVIEW-READY]\nReview-ID: buzz-workflow:t_1:revision\nTarget: immutable-target\nEvidence: focused tests\nTest: open the issue\nKnown limitations: none",
+    tags: [
+      ["e", "e".repeat(64), "", "root"],
+      ["a", REPO_ADDRESS],
+      ["t", "review-ready"],
+      ["review", "buzz-workflow:t_1:revision"],
+      ["review-root", "2".repeat(64)],
+      ["p", OWNER],
+      ["p", TESTER],
+    ],
+  };
+
+  const issue = eventToProjectIssue(issueEvent(), [], [marker], [], {
+    coordinatorPubkeys: [COORDINATOR],
+    humanPubkeys: [OWNER, TESTER],
+  });
+
+  assert.deepEqual(issue.currentReview, {
+    id: "buzz-workflow:t_1:revision",
+    rootId: "2".repeat(64),
+    target: "immutable-target",
+    evidence: "focused tests",
+    test: "open the issue",
+    limitations: "none",
+    authorizedHumanPubkeys: [OWNER, TESTER],
+    verdict: null,
+  });
+});
+
+test("a valid raw accepted verdict remains pending until coordinator confirmation", () => {
+  const accepted = acceptedReviewVerdict();
+  const issue = eventToProjectIssue(
+    issueEvent(),
+    [accepted],
+    [currentReviewMarker()],
+    [],
+    REVIEW_AUTHORITY,
+  );
+
+  assert.equal(issue.status, PROJECT_ISSUE_STATUS.IN_REVIEW);
+  assert.equal(issue.currentReview.verdict.kind, "accepted");
+  assert.equal(issue.currentReview.verdict.confirmation, null);
+  assert.equal(issue.statusEventId, accepted.id);
+});
+
+test("an exact trusted accepted confirmation applies Done", () => {
+  const accepted = acceptedReviewVerdict();
+  const confirmation = reviewConfirmation(accepted);
+  const issue = eventToProjectIssue(
+    issueEvent(),
+    [accepted],
+    [currentReviewMarker(), confirmation],
+    [],
+    REVIEW_AUTHORITY,
+  );
+
+  assert.equal(issue.status, PROJECT_ISSUE_STATUS.DONE);
+  assert.equal(issue.statusEventId, confirmation.id);
+  assert.equal(issue.statusCreatedAt, confirmation.created_at);
+  assert.equal(issue.currentReview.verdict.confirmation.kanbanStatus, "done");
+});
+
+test("an exact trusted rejected confirmation returns the issue to Backlog", () => {
+  const rejected = rejectedReviewVerdict();
+  const pending = eventToProjectIssue(
+    issueEvent(),
+    [rejected],
+    [currentReviewMarker()],
+    [],
+    REVIEW_AUTHORITY,
+  );
+  assert.equal(pending.status, PROJECT_ISSUE_STATUS.IN_REVIEW);
+  assert.equal(pending.currentReview.verdict.kind, "rejected");
+  assert.equal(pending.currentReview.verdict.confirmation, null);
+
+  for (const kanbanStatus of ["ready", "todo"]) {
+    const base = reviewConfirmation(rejected);
+    const confirmation = {
+      ...base,
+      content: base.content.replace(
+        "Kanban-Status: ready",
+        `Kanban-Status: ${kanbanStatus}`,
+      ),
+      tags: base.tags.map((tag) =>
+        tag[0] === "kanban-status" ? ["kanban-status", kanbanStatus] : tag,
+      ),
+    };
+    const issue = eventToProjectIssue(
+      issueEvent(),
+      [rejected],
+      [currentReviewMarker(), confirmation],
+      [],
+      REVIEW_AUTHORITY,
+    );
+    assert.equal(issue.status, PROJECT_ISSUE_STATUS.BACKLOG);
+    assert.equal(
+      issue.currentReview.verdict.confirmation.kanbanStatus,
+      kanbanStatus,
+    );
+  }
+});
+
+test("a pending current review suppresses a generic resolved status", () => {
+  const genericDone = statusEvent({
+    kind: 1631,
+    pubkey: OWNER,
+    createdAt: 300,
+  });
+  const issue = eventToProjectIssue(
+    issueEvent(),
+    [genericDone],
+    [currentReviewMarker()],
+    [],
+    REVIEW_AUTHORITY,
+  );
+
+  assert.equal(issue.status, PROJECT_ISSUE_STATUS.IN_REVIEW);
+});
+
+test("ordinary lifecycle authority remains effective after the current marker", () => {
+  const closed = statusEvent({
+    kind: 1632,
+    pubkey: OWNER,
+    createdAt: 300,
+  });
+  const issue = eventToProjectIssue(
+    issueEvent(),
+    [closed],
+    [currentReviewMarker()],
+    [],
+    REVIEW_AUTHORITY,
+  );
+
+  assert.equal(issue.status, PROJECT_ISSUE_STATUS.CLOSED);
+});
+
+test("raw verdicts require exact recipients and accepted content", () => {
+  const accepted = acceptedReviewVerdict();
+  const malformedVerdicts = [
+    { ...accepted, content: "accepted" },
+    {
+      ...accepted,
+      tags: accepted.tags.filter((tag) => tag[0] !== "p"),
+    },
+    {
+      ...accepted,
+      tags: [...accepted.tags, ["p", OWNER]],
+    },
+  ];
+
+  for (const verdict of malformedVerdicts) {
+    const issue = eventToProjectIssue(
+      issueEvent(),
+      [verdict],
+      [currentReviewMarker()],
+      [],
+      REVIEW_AUTHORITY,
+    );
+    assert.equal(issue.status, PROJECT_ISSUE_STATUS.IN_REVIEW);
+    assert.equal(issue.currentReview.verdict, null);
+  }
+});
+
+test("malformed, stale, untrusted, or duplicate confirmations fail closed", () => {
+  const accepted = acceptedReviewVerdict();
+  const valid = reviewConfirmation(accepted);
+  const cases = [
+    [
+      {
+        ...valid,
+        pubkey: ATTACKER,
+      },
+    ],
+    [
+      {
+        ...valid,
+        created_at: accepted.created_at - 1,
+      },
+    ],
+    [
+      {
+        ...valid,
+        tags: [...valid.tags, ["review", REVIEW_ID]],
+      },
+    ],
+    [
+      {
+        ...valid,
+        content: valid.content.replace("Actor: ", "Actor: wrong-"),
+      },
+    ],
+    [valid, { ...valid, id: "7".repeat(64) }],
+    [
+      valid,
+      {
+        ...valid,
+        id: "8".repeat(64),
+        tags: [...valid.tags, ["review", REVIEW_ID]],
+      },
+    ],
+  ];
+
+  for (const confirmations of cases) {
+    const issue = eventToProjectIssue(
+      issueEvent(),
+      [accepted],
+      [currentReviewMarker(), ...confirmations],
+      [],
+      REVIEW_AUTHORITY,
+    );
+    assert.equal(issue.status, PROJECT_ISSUE_STATUS.IN_REVIEW);
+    assert.equal(issue.currentReview.verdict.confirmation, null);
+  }
+});
+
+test("a review marker for a malformed repository coordinate fails closed", () => {
+  const malformedAddress = "not-a-repository-coordinate";
+  const root = issueEvent({
+    tags: [
+      ["a", malformedAddress],
+      ["subject", "Something is broken"],
+    ],
+  });
+  const marker = {
+    ...currentReviewMarker(),
+    tags: currentReviewMarker().tags.map((tag) =>
+      tag[0] === "a" ? ["a", malformedAddress] : tag,
+    ),
+  };
+
+  assert.equal(
+    eventToProjectIssue(root, [], [marker], [], REVIEW_AUTHORITY).currentReview,
+    null,
+  );
+});
+
+test("a review marker predating the issue fails closed", () => {
+  const marker = { ...currentReviewMarker(), created_at: 99 };
+  const issue = eventToProjectIssue(
+    issueEvent(),
+    [],
+    [marker],
+    [],
+    REVIEW_AUTHORITY,
+  );
+
+  assert.equal(issue.currentReview, null);
+  assert.equal(issue.status, PROJECT_ISSUE_STATUS.BACKLOG);
+});
+
+test("a stale accepted verdict does not resolve the current review", () => {
+  const stale = acceptedReviewVerdict({
+    tags: acceptedReviewVerdict().tags.map((tag) =>
+      tag[0] === "review" ? ["review", "stale-review"] : tag,
+    ),
+  });
+  const issue = eventToProjectIssue(
+    issueEvent(),
+    [stale],
+    [currentReviewMarker()],
+    [],
+    REVIEW_AUTHORITY,
+  );
+
+  assert.equal(issue.status, PROJECT_ISSUE_STATUS.IN_REVIEW);
+});
+
+test("an untrusted accepted verdict does not resolve the current review", () => {
+  const issue = eventToProjectIssue(
+    issueEvent(),
+    [acceptedReviewVerdict({ pubkey: ATTACKER })],
+    [currentReviewMarker()],
+    [],
+    REVIEW_AUTHORITY,
+  );
+
+  assert.equal(issue.status, PROJECT_ISSUE_STATUS.IN_REVIEW);
+});
+
+test("an accepted verdict predating the review marker fails closed", () => {
+  const issue = eventToProjectIssue(
+    issueEvent(),
+    [acceptedReviewVerdict({ created_at: 249 })],
+    [currentReviewMarker()],
+    [],
+    REVIEW_AUTHORITY,
+  );
+
+  assert.equal(issue.status, PROJECT_ISSUE_STATUS.IN_REVIEW);
+});
+
+test("rejects review-ready markers with duplicate review bindings", () => {
+  const TESTER = "f".repeat(64);
+  const COORDINATOR = "1".repeat(64);
+  const marker = {
+    id: "8".repeat(64),
+    kind: 1,
+    pubkey: COORDINATOR,
+    created_at: 250,
+    content:
+      "[REVIEW-READY]\nReview-ID: buzz-workflow:t_1:revision\nTarget: immutable-target\nEvidence: focused tests\nTest: open the issue\nKnown limitations: none",
+    tags: [
+      ["e", "e".repeat(64), "", "root"],
+      ["a", REPO_ADDRESS],
+      ["t", "review-ready"],
+      ["review", "buzz-workflow:t_1:revision"],
+      ["review", "stale-review", "unexpected"],
+      ["review-root", "2".repeat(64)],
+      ["p", OWNER],
+      ["p", TESTER],
+    ],
+  };
+
+  assert.equal(
+    eventToProjectIssue(issueEvent(), [], [marker], [], {
+      coordinatorPubkeys: [COORDINATOR],
+      humanPubkeys: [OWNER, TESTER],
+    }).currentReview,
+    null,
+  );
+
+  const conflictingRoot = {
+    ...marker,
+    tags: [
+      ...marker.tags.filter(
+        (tag) => tag[0] !== "review" || tag[1] === "buzz-workflow:t_1:revision",
+      ),
+      ["e", "f".repeat(64), "", "root"],
+    ],
+  };
+  assert.equal(
+    eventToProjectIssue(issueEvent(), [], [conflictingRoot], [], {
+      coordinatorPubkeys: [COORDINATOR],
+      humanPubkeys: [OWNER, TESTER],
+    }).currentReview,
+    null,
   );
 });
 

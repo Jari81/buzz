@@ -24,10 +24,13 @@ import {
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
 import {
+  availableProjectIssueLifecycleStatuses,
   canChangeProjectIssueStatus,
+  canSubmitProjectIssueVerdict,
   ISSUE_LIFECYCLE_STATUS_LABEL,
-  ISSUE_LIFECYCLE_STATUSES,
+  MAX_REJECTION_REASON_LENGTH,
   type ProjectIssueLifecycleStatus,
+  useSubmitProjectIssueVerdictMutation,
   useUpdateProjectIssueStatusMutation,
 } from "@/features/projects/issueStatus";
 import { entityDiscussionQuery } from "@/features/projects/lib/discussionChannels";
@@ -61,6 +64,33 @@ export function issueStatusClassName(status: ProjectIssue["status"]) {
   if (status === "Done") return "text-purple-400";
   if (status === "Closed") return "text-destructive";
   return "text-green-500";
+}
+
+export function reviewSectionState(
+  issue: Pick<ProjectIssue, "currentReview">,
+  viewer: string | null,
+  submissionState: "idle" | "sent" | "failed" = "idle",
+) {
+  if (!issue.currentReview) return null;
+  const verdict = issue.currentReview.verdict;
+  const confirmation = verdict?.confirmation;
+  const message = confirmation
+    ? verdict.kind === "accepted"
+      ? "Abnahme übernommen"
+      : "Zur Nacharbeit zurückgegeben"
+    : verdict || submissionState === "sent"
+      ? "Urteil gesendet – Workflow-Bestätigung ausstehend"
+      : submissionState === "failed"
+        ? "Urteil konnte nicht gesendet werden. Bitte erneut versuchen."
+        : null;
+  return {
+    ...issue.currentReview,
+    canSubmit:
+      canSubmitProjectIssueVerdict(issue, viewer) &&
+      verdict === null &&
+      submissionState !== "sent",
+    message,
+  };
 }
 
 const ISSUE_STATUS_SECTIONS = [
@@ -365,7 +395,9 @@ function IssueStatusPicker({
         <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start">
-        {ISSUE_LIFECYCLE_STATUSES.map((status) => {
+        {availableProjectIssueLifecycleStatuses(
+          issue.currentReview !== null,
+        ).map((status) => {
           const label = ISSUE_LIFECYCLE_STATUS_LABEL[status];
           const option = issueStatusVisual(label);
           return (
@@ -386,6 +418,124 @@ function IssueStatusPicker({
         })}
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+function IssueReviewSection({
+  issue,
+  project,
+  viewer,
+}: {
+  issue: ProjectIssue;
+  project: Project;
+  viewer: string | null;
+}) {
+  const [reason, setReason] = React.useState("");
+  const [submissionState, setSubmissionState] = React.useState<
+    "idle" | "sent" | "failed"
+  >("idle");
+  const { isPending, mutateAsync: submitVerdict } =
+    useSubmitProjectIssueVerdictMutation(project);
+  const review = reviewSectionState(issue, viewer, submissionState);
+
+  if (!review) return null;
+
+  const submit = async (verdict: "accepted" | "rejected") => {
+    if (!review.canSubmit) return;
+    if (
+      verdict === "accepted" &&
+      !globalThis.confirm(
+        `Done for review ${review.id}?\n\nImmutable target: ${review.target}`,
+      )
+    ) {
+      return;
+    }
+    try {
+      await submitVerdict({
+        issue,
+        ...(verdict === "rejected" ? { reason } : {}),
+        verdict,
+      });
+      setSubmissionState("sent");
+      toast.success("Urteil gesendet – Workflow-Bestätigung ausstehend");
+    } catch (error) {
+      setSubmissionState("failed");
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Failed to send human verdict.",
+      );
+    }
+  };
+
+  return (
+    <OverviewRailSection title="Review">
+      <dl className="space-y-2 text-xs">
+        <div>
+          <dt className="text-muted-foreground">Review-ID</dt>
+          <dd className="break-all font-medium text-foreground">{review.id}</dd>
+        </div>
+        <div>
+          <dt className="text-muted-foreground">Target</dt>
+          <dd className="break-words text-foreground">{review.target}</dd>
+        </div>
+        <div>
+          <dt className="text-muted-foreground">Evidence</dt>
+          <dd className="break-words text-foreground">{review.evidence}</dd>
+        </div>
+        <div>
+          <dt className="text-muted-foreground">Test</dt>
+          <dd className="break-words text-foreground">{review.test}</dd>
+        </div>
+        <div>
+          <dt className="text-muted-foreground">Known limitations</dt>
+          <dd className="break-words text-foreground">{review.limitations}</dd>
+        </div>
+      </dl>
+      {review.message ? (
+        <p className="mt-3 text-xs font-medium text-foreground" role="status">
+          {review.message}
+        </p>
+      ) : null}
+      {review.canSubmit ? (
+        <div className="mt-3 space-y-2">
+          <button
+            className="rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground disabled:opacity-60"
+            disabled={isPending}
+            onClick={() => void submit("accepted")}
+            type="button"
+          >
+            Done
+          </button>
+          <label
+            className="block text-xs text-muted-foreground"
+            htmlFor="review-rejection-reason"
+          >
+            Ablehnen mit Grund
+          </label>
+          <textarea
+            className="min-h-20 w-full rounded-md border border-border/60 bg-background p-2 text-xs text-foreground"
+            disabled={isPending}
+            id="review-rejection-reason"
+            maxLength={MAX_REJECTION_REASON_LENGTH}
+            onChange={(event) => setReason(event.target.value)}
+            value={reason}
+          />
+          <button
+            className="rounded-md border border-border/60 px-2.5 py-1 text-xs font-medium disabled:opacity-60"
+            disabled={isPending || !reason.trim()}
+            onClick={() => void submit("rejected")}
+            type="button"
+          >
+            Ablehnen
+          </button>
+        </div>
+      ) : !review.verdict && submissionState !== "sent" ? (
+        <p className="mt-3 text-xs text-muted-foreground">
+          Review data is read-only for this identity.
+        </p>
+      ) : null}
+    </OverviewRailSection>
   );
 }
 
@@ -454,6 +604,12 @@ function IssueMetaRail({
           </span>
         )}
       </OverviewRailSection>
+      <IssueReviewSection
+        issue={issue}
+        key={`${issue.id}:${issue.currentReview?.id ?? "none"}`}
+        project={project}
+        viewer={viewer}
+      />
       {issue.assignees.length > 0 || viewer ? (
         <OverviewRailSection title="Assignees">
           <IssueAssigneesRow

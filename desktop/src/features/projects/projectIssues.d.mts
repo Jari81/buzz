@@ -19,6 +19,37 @@ export type ProjectIssueComment = {
   actionRequired: boolean;
 };
 
+export type ProjectIssueReviewConfirmation = {
+  eventId: string;
+  createdAt: number;
+  kanbanStatus: "done" | "ready" | "todo";
+};
+
+export type ProjectIssueReviewVerdict = {
+  eventId: string;
+  kind: "accepted" | "rejected";
+  actorPubkey: string;
+  createdAt: number;
+  reason: string | null;
+  confirmation: ProjectIssueReviewConfirmation | null;
+};
+
+export type ProjectIssueReview = {
+  id: string;
+  rootId: string;
+  target: string;
+  evidence: string;
+  test: string;
+  limitations: string;
+  authorizedHumanPubkeys: string[];
+  verdict: ProjectIssueReviewVerdict | null;
+};
+
+export type ProjectIssueReviewAuthority = {
+  coordinatorPubkeys: string[];
+  humanPubkeys: string[];
+};
+
 export type ProjectIssue = {
   id: string;
   title: string;
@@ -37,6 +68,7 @@ export type ProjectIssue = {
   statusEventId: string | null;
   statusCreatedAt: number | null;
   updatedAt: number;
+  currentReview: ProjectIssueReview | null;
   comments: ProjectIssueComment[];
 };
 
@@ -63,12 +95,14 @@ export function eventToProjectIssue(
   statusEvents?: RelayEvent[],
   commentEvents?: RelayEvent[],
   additionalStatusActors?: string[],
+  reviewAuthority?: ProjectIssueReviewAuthority,
 ): ProjectIssue;
 export function projectIssueEventsToIssues(
   issueEvents: RelayEvent[],
   statusEvents?: RelayEvent[],
   commentEvents?: RelayEvent[],
   additionalStatusActors?: string[],
+  reviewAuthority?: ProjectIssueReviewAuthority,
 ): ProjectIssue[];
 export function nextProjectIssueStatusCreatedAt(
   issue: ProjectIssue,

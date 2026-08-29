@@ -272,6 +272,7 @@ async function fetchProjectIssues(
     statusEvents,
     mergeEventsById(commentEvents, assignmentEvents),
     oaOwner ? [oaOwner.owner] : [],
+    project.reviewAuthority,
   );
 }
 

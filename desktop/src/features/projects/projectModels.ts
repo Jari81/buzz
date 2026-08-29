@@ -1,3 +1,4 @@
+import type { ProjectIssueReviewAuthority } from "./projectIssues.mjs";
 import type { RelayEvent } from "@/shared/api/types";
 import {
   KIND_PROJECT_ANNOUNCEMENT,
@@ -22,6 +23,8 @@ export type Repository = {
   channelId?: string | null;
   eventContent?: string;
   eventTags?: string[][];
+  /** Explicit project-scoped authority injected by the project contract. */
+  reviewAuthority?: ProjectIssueReviewAuthority;
 };
 
 export type Project = {
@@ -38,6 +41,8 @@ export type Project = {
   repositoryAddresses: string[];
   repositoryRelayHints?: Record<string, string>;
   repositories: Repository[];
+  /** Explicit project-scoped authority injected by the project contract. */
+  reviewAuthority?: ProjectIssueReviewAuthority;
   unavailableRepositoryAddresses?: string[];
   visibility?: "listed" | "unlisted";
   legacy: boolean;
@@ -98,6 +103,30 @@ function isValidPubkey(value: string): boolean {
  */
 function isValidProjectMemberOwner(value: string): boolean {
   return /^[0-9a-f]{64}$/.test(value);
+}
+
+export function parseProjectReviewAuthority(
+  tags: string[][],
+): ProjectIssueReviewAuthority | undefined {
+  const coordinatorTags = tags.filter((tag) => tag[0] === "review-coordinator");
+  const humanTags = tags.filter((tag) => tag[0] === "review-human");
+  if (coordinatorTags.length === 0 || humanTags.length !== 2) return undefined;
+  if (
+    [...coordinatorTags, ...humanTags].some(
+      (tag) => tag.length !== 2 || !isValidProjectMemberOwner(tag[1] ?? ""),
+    )
+  ) {
+    return undefined;
+  }
+  const coordinatorPubkeys = coordinatorTags.map((tag) => tag[1]);
+  const humanPubkeys = humanTags.map((tag) => tag[1]);
+  if (
+    new Set(coordinatorPubkeys).size !== coordinatorPubkeys.length ||
+    new Set(humanPubkeys).size !== humanPubkeys.length
+  ) {
+    return undefined;
+  }
+  return { coordinatorPubkeys, humanPubkeys };
 }
 
 /** NIP-MP rule `member-cap`: a project may carry at most 64 member `a` tags. */
@@ -339,6 +368,7 @@ export function eventToExplicitProject(
   const visibility =
     rawVisibility === "unlisted" ? ("unlisted" as const) : ("listed" as const);
   const channel = getTag(event, "buzz-channel");
+  const reviewAuthority = parseProjectReviewAuthority(event.tags);
   return {
     id: projectAddress,
     dtag,
@@ -355,8 +385,11 @@ export function eventToExplicitProject(
     repositoryRelayHints,
     repositories: repositoryAddresses.flatMap((address) => {
       const repository = visibleRepositoriesByAddress.get(address);
-      return repository ? [repository] : [];
+      return repository
+        ? [reviewAuthority ? { ...repository, reviewAuthority } : repository]
+        : [];
     }),
+    ...(reviewAuthority ? { reviewAuthority } : {}),
     unavailableRepositoryAddresses: repositoryAddresses.filter(
       (address) => !repositoriesByAddress.has(address),
     ),
@@ -526,7 +559,9 @@ export function addRepositoryToProject(
     ...project.repositories.filter(
       (candidate) => candidate.repoAddress !== repository.repoAddress,
     ),
-    repository,
+    project.reviewAuthority
+      ? { ...repository, reviewAuthority: project.reviewAuthority }
+      : repository,
   ].sort((left, right) => left.repoAddress.localeCompare(right.repoAddress));
 
   return {

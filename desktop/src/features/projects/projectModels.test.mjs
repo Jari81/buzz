@@ -14,6 +14,9 @@ import { projectMatchesRouteId } from "./projectRoutes.ts";
 const PROJECT_OWNER = "a".repeat(64);
 const FRONTEND_OWNER = "b".repeat(64);
 const BACKEND_OWNER = "c".repeat(64);
+const REVIEW_COORDINATOR = "d".repeat(64);
+const REVIEW_OWNER = "e".repeat(64);
+const REVIEW_TESTER = "f".repeat(64);
 const RELAY_ORIGIN = "https://relay.example";
 
 function repositoryEvent(owner, id, createdAt = 100) {
@@ -59,6 +62,79 @@ test("eventToRepository preserves repository-scoped identity and clone data", ()
   assert.deepEqual(repository.cloneUrls, [
     `${RELAY_ORIGIN}/git/${FRONTEND_OWNER}/frontend`,
   ]);
+});
+
+test("eventToExplicitProject populates valid signed review authority on the project and its repositories", () => {
+  const repository = eventToRepository(
+    repositoryEvent(PROJECT_OWNER, "frontend"),
+    RELAY_ORIGIN,
+  );
+  const address = repository.repoAddress;
+  const event = projectEvent([["a", address]], {
+    tags: [
+      ["d", "sprout"],
+      ["a", address],
+      ["review-coordinator", REVIEW_COORDINATOR],
+      ["review-human", REVIEW_OWNER],
+      ["review-human", REVIEW_TESTER],
+    ],
+  });
+
+  const project = eventToExplicitProject(
+    event,
+    new Map([[address, repository]]),
+    new Map([[address, repository]]),
+  );
+
+  assert.deepEqual(project.reviewAuthority, {
+    coordinatorPubkeys: [REVIEW_COORDINATOR],
+    humanPubkeys: [REVIEW_OWNER, REVIEW_TESTER],
+  });
+  assert.deepEqual(
+    project.repositories[0].reviewAuthority,
+    project.reviewAuthority,
+  );
+  assert.equal(repository.reviewAuthority, undefined);
+});
+
+test("malformed, duplicate, or incomplete signed review authority is absent", () => {
+  const cases = [
+    [["review-human", REVIEW_OWNER]],
+    [
+      ["review-coordinator", REVIEW_COORDINATOR.toUpperCase()],
+      ["review-human", REVIEW_OWNER],
+      ["review-human", REVIEW_TESTER],
+    ],
+    [
+      ["review-coordinator", REVIEW_COORDINATOR],
+      ["review-human", REVIEW_OWNER],
+      ["review-human", REVIEW_OWNER],
+    ],
+    [
+      ["review-coordinator", REVIEW_COORDINATOR, "unexpected"],
+      ["review-human", REVIEW_OWNER],
+      ["review-human", REVIEW_TESTER],
+    ],
+  ];
+
+  for (const authorityTags of cases) {
+    const project = eventToExplicitProject(
+      projectEvent([], {
+        tags: [["d", "sprout"], ...authorityTags],
+      }),
+      new Map(),
+      new Map(),
+    );
+    assert.ok(project);
+    assert.equal(project.reviewAuthority, undefined);
+  }
+
+  const [legacy] = buildProjectReadModels({
+    projectEvents: [],
+    repositoryEvents: [repositoryEvent(PROJECT_OWNER, "legacy")],
+  });
+  assert.equal(legacy.reviewAuthority, undefined);
+  assert.equal(legacy.repositories[0].reviewAuthority, undefined);
 });
 
 test("buildProjectReadModels resolves repositories with a deterministic selection fallback", () => {

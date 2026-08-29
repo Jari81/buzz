@@ -17,6 +17,7 @@ import {
 import {
   getTag,
   type ProjectIssue,
+  type ProjectIssueReviewAuthority,
   projectIssueEventsToIssues,
 } from "./projectIssues.mjs";
 import {
@@ -30,6 +31,7 @@ type RepositoryReference = {
 
 type ProjectReference = {
   repositories: RepositoryReference[];
+  reviewAuthority?: ProjectIssueReviewAuthority;
 };
 
 type ProjectRepository<TProject extends ProjectReference> =
@@ -195,6 +197,8 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
           ),
           statusesByRepo.get(repository.repoAddress) ?? [],
           commentsByRepo.get(repository.repoAddress) ?? [],
+          [],
+          project.reviewAuthority,
         ).map((issue) => ({ issue, project, repository })),
       ),
     )
