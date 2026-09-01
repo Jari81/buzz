@@ -36,7 +36,6 @@ export type ProjectIssueReviewVerdict = {
 
 export type ProjectIssueReview = {
   id: string;
-  rootId: string;
   target: string;
   evidence: string;
   test: string;

@@ -93,7 +93,7 @@ test("fetchProjectsWorkItems deduplicates issues from a shared repository", asyn
 
 test("fetchProjectsWorkItems threads project review authority into issue reduction", async () => {
   const issue = makeIssue(ISSUE_ID);
-  const reviewId = "buzz-workflow:t_1:revision";
+  const reviewId = "9".repeat(64);
   const marker = {
     id: "3".repeat(64),
     kind: 1,
@@ -105,7 +105,6 @@ test("fetchProjectsWorkItems threads project review authority into issue reducti
       ["a", REPO_ADDRESS],
       ["t", "review-ready"],
       ["review", reviewId],
-      ["review-root", "2".repeat(64)],
       ["p", REPO_OWNER],
       ["p", REVIEW_TESTER],
     ],

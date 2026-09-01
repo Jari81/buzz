@@ -329,14 +329,14 @@ function currentReviewForIssue(issue, issueCommentEvents, reviewAuthority) {
     !exactlyOneTag(marker, "e", [issue.id, "", "root"]) ||
     !exactlyOneTag(marker, "a", [repoAddress]) ||
     !exactlyOneTag(marker, "t", ["review-ready"]) ||
+    getAllTags(marker, "review-root").length > 0 ||
     !exactRecipientSet(marker, expectedHumans)
   ) {
     return null;
   }
   const id = singleTagValue(marker, "review");
-  const rootId = singleTagValue(marker, "review-root");
   const content = id ? reviewContent(marker, id) : null;
-  if (!id || !rootId || !/^[0-9a-f]{64}$/.test(rootId) || !content) {
+  if (!id || !/^[0-9a-f]{64}$/.test(id) || !content) {
     return null;
   }
   if (
@@ -352,7 +352,6 @@ function currentReviewForIssue(issue, issueCommentEvents, reviewAuthority) {
     coordinators,
     review: {
       id,
-      rootId,
       ...content,
       authorizedHumanPubkeys: humans,
       verdict: null,
@@ -393,7 +392,7 @@ function humanVerdictForCurrentReview(
           !exactlyOneTag(event, "a", [repoAddress]) ||
           !exactlyOneTag(event, "t", ["human-verdict"]) ||
           !exactlyOneTag(event, "review", [review.id]) ||
-          !exactlyOneTag(event, "review-root", [review.rootId]) ||
+          getAllTags(event, "review-root").length > 0 ||
           !exactRecipientSet(event, expectedRecipients)
         ) {
           return false;
@@ -422,10 +421,7 @@ function confirmationContent(event, issue, review, rawVerdict, kanbanStatus) {
   const expectedNames = [
     "Issue",
     "Repository",
-    "Board",
-    "Task",
     "Review",
-    "Review-Root",
     "Verdict-Event",
     "Actor",
     "Verdict",
@@ -442,13 +438,10 @@ function confirmationContent(event, issue, review, rawVerdict, kanbanStatus) {
     fields.get("Issue") === issue.id &&
     fields.get("Repository") === getTag(issue, "a") &&
     fields.get("Review") === review.id &&
-    fields.get("Review-Root") === review.rootId &&
     fields.get("Verdict-Event") === rawVerdict.id &&
     fields.get("Actor") === rawVerdict.pubkey &&
     fields.get("Verdict") === verdict &&
     fields.get("Kanban-Status") === kanbanStatus &&
-    Boolean(fields.get("Board")) &&
-    Boolean(fields.get("Task")) &&
     (verdict === "accepted"
       ? !fields.has("Reason")
       : fields.get("Reason") === rawVerdict.content)
@@ -484,7 +477,7 @@ function confirmationForCurrentVerdict(
       !exactlyOneTag(event, "a", [getTag(issue, "a")]) ||
       !exactlyOneTag(event, "t", ["issue-verdict-confirmed"]) ||
       !exactlyOneTag(event, "review", [review.id]) ||
-      !exactlyOneTag(event, "review-root", [review.rootId]) ||
+      getAllTags(event, "review-root").length > 0 ||
       !exactlyOneTag(event, "verdict", [verdict]) ||
       !exactlyOneTag(event, "verdict-event", [rawVerdict.id]) ||
       !exactRecipientSet(event, new Set([rawVerdict.pubkey]))
@@ -562,9 +555,7 @@ export function eventToProjectIssue(
           : null,
       }
     : null;
-  const confirmedVerdict = currentReview?.verdict?.confirmation
-    ? currentReview.verdict.kind
-    : null;
+  const directVerdict = currentReview?.verdict?.kind ?? null;
   const latestLifecycleAfterMarker =
     latestStatus &&
     currentReviewBinding &&
@@ -572,9 +563,9 @@ export function eventToProjectIssue(
       ? latestStatus
       : null;
   const status =
-    confirmedVerdict === "accepted"
+    directVerdict === "accepted"
       ? PROJECT_ISSUE_STATUS.DONE
-      : confirmedVerdict === "rejected"
+      : directVerdict === "rejected"
         ? PROJECT_ISSUE_STATUS.BACKLOG
         : currentReview
           ? latestLifecycleAfterMarker?.kind === 1631 ||
@@ -583,7 +574,6 @@ export function eventToProjectIssue(
             : statusFromEvent(issue, latestLifecycleAfterMarker)
           : statusFromEvent(issue, latestStatus);
   const effectiveStatus =
-    confirmation?.event ??
     rawVerdict ??
     (currentReviewBinding
       ? (latestStatus ?? currentReviewBinding.marker)

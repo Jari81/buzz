@@ -55,9 +55,10 @@ test("label-driven states are not offered as publishable statuses", () => {
 });
 
 test("builds exact personal-signed human verdict contracts", () => {
+  const reviewId = "9".repeat(64);
   const issue = {
     author: AUTHOR,
-    currentReview: { id: "review-42", rootId: "review-root-42" },
+    currentReview: { id: reviewId },
     id: "f".repeat(64),
   };
   const project = { owner: OWNER, repoAddress: `30617:${OWNER}:demo` };
@@ -74,8 +75,7 @@ test("builds exact personal-signed human verdict contracts", () => {
         ["p", AUTHOR],
         ["t", "human-verdict"],
         ["verdict", "accepted"],
-        ["review", "review-42"],
-        ["review-root", "review-root-42"],
+        ["review", reviewId],
       ],
     },
   );
@@ -96,8 +96,7 @@ test("builds exact personal-signed human verdict contracts", () => {
         ["p", AUTHOR],
         ["t", "human-verdict"],
         ["verdict", "rejected"],
-        ["review", "review-42"],
-        ["review-root", "review-root-42"],
+        ["review", reviewId],
       ],
     },
   );
@@ -116,7 +115,7 @@ test("builds exact personal-signed human verdict contracts", () => {
 test("human verdict recipients are the deduped exact owner and author set", () => {
   const issue = {
     author: OWNER,
-    currentReview: { id: "review-42", rootId: "1".repeat(64) },
+    currentReview: { id: "9".repeat(64) },
     id: "f".repeat(64),
   };
   const project = { owner: OWNER, repoAddress: `30617:${OWNER}:demo` };
@@ -137,7 +136,7 @@ test("rejection reasons enforce the exact 500-character contract", () => {
   assert.equal(MAX_REJECTION_REASON_LENGTH, 500);
   const issue = {
     author: AUTHOR,
-    currentReview: { id: "review-42", rootId: "1".repeat(64) },
+    currentReview: { id: "9".repeat(64) },
     id: "f".repeat(64),
   };
   const project = { owner: OWNER, repoAddress: `30617:${OWNER}:demo` };

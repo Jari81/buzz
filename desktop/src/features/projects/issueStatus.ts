@@ -90,9 +90,8 @@ export function buildProjectIssueVerdict({
   verdict: ProjectIssueHumanVerdict;
 }): { content: string; kind: number; tags: string[][] } {
   const reviewId = issue.currentReview?.id;
-  const reviewRootId = issue.currentReview?.rootId;
-  if (!reviewId || !reviewRootId) {
-    throw new Error("A current review with its bound root is required.");
+  if (!reviewId) {
+    throw new Error("A current review is required.");
   }
   if (issue.currentReview?.verdict) {
     throw new Error("A verdict was already sent for the current review.");
@@ -121,7 +120,6 @@ export function buildProjectIssueVerdict({
       ["t", "human-verdict"],
       ["verdict", verdict],
       ["review", reviewId],
-      ["review-root", reviewRootId],
     ],
   };
 }
