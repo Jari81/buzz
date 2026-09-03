@@ -1,4 +1,5 @@
 import 'package:buzz/features/home/home_page.dart';
+import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_page.dart';
 import 'package:buzz/features/profile/profile_avatar.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -13,6 +14,8 @@ void main() {
     int unreadInboxCount = 0,
     bool disableAnimations = false,
     Gradient? topSectionGradient,
+    Widget Function(Channel channel)? channelPageBuilder,
+    WidgetBuilder? projectsPageBuilder,
   }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -29,10 +32,42 @@ void main() {
         home: HomePage(
           settingsPageBuilder: _buildSettingsPage,
           hasUnreadInbox: unreadInboxCount > 0,
+          channelPageBuilder: channelPageBuilder,
+          projectsPageBuilder: projectsPageBuilder,
         ),
       ),
     );
   }
+
+  testWidgets('forwards channel route construction to ChannelsPage', (
+    tester,
+  ) async {
+    Widget buildChannel(Channel channel) => Text(channel.id);
+    await tester.pumpWidget(await buildHome(channelPageBuilder: buildChannel));
+    await tester.pump();
+
+    expect(
+      tester.widget<ChannelsPage>(find.byType(ChannelsPage)).channelPageBuilder,
+      same(buildChannel),
+    );
+  });
+
+  testWidgets('forwards the Projects destination to ChannelsPage', (
+    tester,
+  ) async {
+    Widget buildProjects(BuildContext context) => const Text('Projects');
+    await tester.pumpWidget(
+      await buildHome(projectsPageBuilder: buildProjects),
+    );
+    await tester.pump();
+
+    expect(
+      tester
+          .widget<ChannelsPage>(find.byType(ChannelsPage))
+          .projectsPageBuilder,
+      same(buildProjects),
+    );
+  });
 
   testWidgets('shows icon-only navigation and an aligned quick action', (
     tester,

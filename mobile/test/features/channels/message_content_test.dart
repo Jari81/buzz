@@ -1802,6 +1802,38 @@ Photos
         },
       );
 
+      testWidgets('routes an issue chip when a destination is supplied', (
+        tester,
+      ) async {
+        final owner = 'ab' * 32;
+        final id = 'cd' * 32;
+        final url = 'buzz://issue?id=$id&owner=$owner&d=buzz';
+        EntityDeepLink? tapped;
+        await tester.pumpWidget(
+          _testable(
+            MessageContent(content: url, onEntityTap: (link) => tapped = link),
+          ),
+        );
+        await tester.pump();
+
+        final chip = find.byKey(ValueKey('buzz-link-chip:$url'));
+        expect(
+          find.ancestor(
+            of: chip,
+            matching: find.byWidgetPredicate(
+              (widget) => widget is IgnorePointer && widget.ignoring,
+            ),
+          ),
+          findsNothing,
+        );
+        await tester.tap(chip);
+        await tester.pump();
+
+        expect(tapped?.type, 'issue');
+        expect(tapped?.repository, 'buzz');
+        expect(tapped?.eventId, id);
+      });
+
       testWidgets('uses shortened channel identifiers when names are missing', (
         tester,
       ) async {

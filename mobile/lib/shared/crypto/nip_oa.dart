@@ -15,21 +15,29 @@ import 'package:pointycastle/digests/sha256.dart';
 /// verified against the profile event author, so a forged or stale marker
 /// cannot turn a person into an agent.
 ///
-/// Returns the owner pubkey (lowercase hex) for the first valid auth tag,
-/// or null if none verifies.
+/// Returns the owner pubkey (lowercase hex) when the profile has exactly one
+/// valid auth tag, or null otherwise.
 String? verifiedOaOwnerPubkey(List<List<String>> tags, String agentPubkey) {
   final agent = agentPubkey.toLowerCase();
+  final authTags = tags
+      .where((tag) => tag.isNotEmpty && tag.first == 'auth')
+      .toList();
+  if (authTags.length != 1) return null;
 
-  for (final tag in tags) {
-    if (tag.length != 4 || tag[0] != 'auth') continue;
+  for (final tag in authTags) {
+    if (tag.length != 4) continue;
 
-    final owner = tag[1].toLowerCase();
+    final owner = tag[1];
     final conditions = tag[2];
     final sig = tag[3];
 
+    // NIP-OA hex encodings are canonical lowercase.
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(owner) ||
+        !RegExp(r'^[0-9a-f]{128}$').hasMatch(sig)) {
+      continue;
+    }
     // Self-attestation is meaningless and rejected.
     if (owner == agent) continue;
-    if (owner.length != 64 || sig.length != 128) continue;
     if (!_validConditions(conditions)) continue;
 
     final preimage = utf8.encode('nostr:agent-auth:$agent:$conditions');
@@ -54,6 +62,28 @@ String? verifiedOaOwnerPubkey(List<List<String>> tags, String agentPubkey) {
   return null;
 }
 
+/// Verify an owner attestation and enforce its conditions for one event.
+String? verifiedOaOwnerPubkeyForEvent(
+  List<List<String>> tags,
+  String agentPubkey, {
+  required int kind,
+  required int createdAt,
+}) {
+  final authTags = tags
+      .where((tag) => tag.isNotEmpty && tag.first == 'auth')
+      .toList();
+  if (authTags.length != 1) return null;
+  for (final tag in authTags) {
+    if (tag.length != 4) continue;
+    if (!_conditionsAllowEvent(tag[2], kind: kind, createdAt: createdAt)) {
+      continue;
+    }
+    final owner = verifiedOaOwnerPubkey([tag], agentPubkey);
+    if (owner != null) return owner;
+  }
+  return null;
+}
+
 /// Validate the NIP-OA `conditions` string: empty, or `&`-joined clauses of
 /// `kind=<n>`, `created_at<<n>`, or `created_at><n>` with canonical decimals.
 bool _validConditions(String conditions) {
@@ -70,5 +100,28 @@ bool _validConditions(String conditions) {
     if (clause.startsWith('kind=') && value > 65535) return false;
   }
 
+  return true;
+}
+
+bool _conditionsAllowEvent(
+  String conditions, {
+  required int kind,
+  required int createdAt,
+}) {
+  if (!_validConditions(conditions)) return false;
+  if (conditions.isEmpty) return true;
+  for (final clause in conditions.split('&')) {
+    if (clause.startsWith('kind=')) {
+      if (kind != int.parse(clause.substring('kind='.length))) return false;
+    } else if (clause.startsWith('created_at<')) {
+      if (createdAt >= int.parse(clause.substring('created_at<'.length))) {
+        return false;
+      }
+    } else if (clause.startsWith('created_at>')) {
+      if (createdAt <= int.parse(clause.substring('created_at>'.length))) {
+        return false;
+      }
+    }
+  }
   return true;
 }

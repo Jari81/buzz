@@ -42,6 +42,8 @@ void main() {
     Gradient? topSectionGradient,
     ValueChanged<double>? onSettingsTransitionProgress,
     ValueListenable<int>? tabReselection,
+    WidgetBuilder? projectsPageBuilder,
+    Widget Function(Channel channel)? channelPageBuilder,
   }) {
     return ProviderScope(
       overrides: [
@@ -75,6 +77,8 @@ void main() {
               onSettingsTransitionProgress:
                   onSettingsTransitionProgress ?? (_) {},
               tabReselection: tabReselection,
+              projectsPageBuilder: projectsPageBuilder,
+              channelPageBuilder: channelPageBuilder,
             ),
             const Positioned.fill(
               child: ChannelQuickActionsLauncher(
@@ -129,6 +133,54 @@ void main() {
       isMember: true,
     ),
   ];
+
+  testWidgets('opens Projects from the header when preview is enabled', (
+    tester,
+  ) async {
+    final community = Community(
+      id: 'alpha',
+      name: 'Alpha',
+      relayUrl: 'wss://alpha.example.com',
+      addedAt: DateTime(2025),
+      previewProjects: true,
+    );
+    await tester.pumpWidget(
+      buildTestable(
+        projectsPageBuilder: (_) =>
+            const Scaffold(body: Center(child: Text('Projects destination'))),
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+          activeCommunityProvider.overrideWith((ref) async => community),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Projects'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Projects destination'), findsOneWidget);
+  });
+
+  testWidgets('opens channels through the supplied page builder', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      buildTestable(
+        channelPageBuilder: (channel) =>
+            Scaffold(body: Text('channel:${channel.id}')),
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('general'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('channel:1'), findsOneWidget);
+  });
 
   testWidgets('shows grouped channel list when data loads', (tester) async {
     await tester.pumpWidget(

@@ -39,3 +39,36 @@ class _CommunitySection extends ConsumerWidget {
     );
   }
 }
+
+class _MobilePreviewSection extends ConsumerWidget {
+  const _MobilePreviewSection();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final community = ref.watch(activeCommunityProvider).value;
+    if (community == null) return const SizedBox.shrink();
+
+    return AppListCard(
+      label: 'Mobile Preview · This community',
+      verticalPadding: Grid.twelve,
+      children: [
+        AppListRow(
+          key: const ValueKey('mobile-preview-projects-row'),
+          icon: LucideIcons.folderGit2,
+          title: 'Projects',
+          trailing: Switch.adaptive(
+            key: const ValueKey('mobile-preview-projects-toggle'),
+            value: community.previewProjects,
+            onChanged: (enabled) {
+              unawaited(
+                ref
+                    .read(communityListProvider.notifier)
+                    .setPreviewProjects(community.id, enabled),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+}

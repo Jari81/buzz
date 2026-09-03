@@ -105,6 +105,9 @@ class MessageContent extends HookConsumerWidget {
   /// mentioned user's pubkey.
   final void Function(String pubkey)? onMentionTap;
 
+  /// Opens a resolved repo/PR/issue destination supplied by the app shell.
+  final ValueChanged<EntityDeepLink>? onEntityTap;
+
   /// Opens the message's thread from the full-screen image viewer.
   final VoidCallback? onMediaReply;
 
@@ -142,6 +145,7 @@ class MessageContent extends HookConsumerWidget {
     this.tags = const [],
     this.onChannelTap,
     this.onMentionTap,
+    this.onEntityTap,
     this.onMediaReply,
     this.onMediaMore,
     this.baseStyle,
@@ -396,7 +400,7 @@ class MessageContent extends HookConsumerWidget {
             'Pull request ${eventId!.substring(0, 8)} in repository $repository',
           _ => 'Issue ${eventId!.substring(0, 8)} in repository $repository',
         },
-        interactive: false,
+        interactive: type == 'issue' && onEntityTap != null,
       ),
       _ => null,
     };
@@ -427,9 +431,10 @@ class MessageContent extends HookConsumerWidget {
           )
         : linkTextWidget;
 
-    // Mobile has no repo/PR/issue destination yet. Keep these presentation-only
-    // instead of exposing a control whose tap cannot do anything.
-    if (buzzLink is EntityDeepLink) {
+    // Repo and PR remain presentation-only in Build A. Issue chips become
+    // controls only when the composition root supplied a real destination.
+    if (buzzLink is EntityDeepLink &&
+        (buzzLink.type != 'issue' || onEntityTap == null)) {
       return IgnorePointer(child: renderedLink);
     }
 
@@ -443,6 +448,10 @@ class MessageContent extends HookConsumerWidget {
         // Message and join links still need the top-level authenticated
         // dispatcher.
         if (uri.scheme == 'buzz') {
+          if (buzzLink case final EntityDeepLink entityLink) {
+            onEntityTap?.call(entityLink);
+            return;
+          }
           final deepLink = parseBuzzDeepLink(uri);
           if (deepLink case ChannelDeepLink(:final channelId)) {
             resolvedChannelTap(channelId);

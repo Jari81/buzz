@@ -106,6 +106,35 @@ void main() {
       },
     );
 
+    test('persists Projects preview only for the selected community', () async {
+      container = createContainer();
+      await container.read(communityListProvider.future);
+
+      final first = Community.create(
+        name: 'First',
+        relayUrl: 'https://first.example.com',
+      );
+      final second = Community.create(
+        name: 'Second',
+        relayUrl: 'https://second.example.com',
+      );
+      final notifier = container.read(communityListProvider.notifier);
+      await notifier.addCommunity(first);
+      await notifier.addCommunity(second);
+
+      await notifier.setPreviewProjects(first.id, true);
+
+      final stored = await communityStorage.loadAll();
+      expect(
+        stored.singleWhere((item) => item.id == first.id).previewProjects,
+        isTrue,
+      );
+      expect(
+        stored.singleWhere((item) => item.id == second.id).previewProjects,
+        isFalse,
+      );
+    });
+
     test('renameCommunity updates name', () async {
       container = createContainer();
       await container.read(communityListProvider.future);

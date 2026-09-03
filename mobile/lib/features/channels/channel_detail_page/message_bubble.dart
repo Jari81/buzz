@@ -11,6 +11,8 @@ class _MessageBubble extends HookConsumerWidget {
   final bool isArchived;
   final FocusNode? composerFocusNode;
   final VoidCallback? restoreComposerFocus;
+  final WidgetBuilder? issuesPageBuilder;
+  final ValueChanged<EntityDeepLink>? onEntityTap;
 
   const _MessageBubble({
     required this.message,
@@ -23,6 +25,8 @@ class _MessageBubble extends HookConsumerWidget {
     this.isArchived = false,
     this.composerFocusNode,
     this.restoreComposerFocus,
+    this.issuesPageBuilder,
+    this.onEntityTap,
   });
 
   @override
@@ -125,6 +129,8 @@ class _MessageBubble extends HookConsumerWidget {
                       currentPubkey: currentPubkey,
                       isMember: isMember,
                       isArchived: isArchived,
+                      issuesPageBuilder: issuesPageBuilder,
+                      onEntityTap: onEntityTap,
                     ),
                   ),
                 ),
@@ -236,6 +242,9 @@ class _MessageBubble extends HookConsumerWidget {
                                               currentPubkey: currentPubkey,
                                               isMember: isMember,
                                               isArchived: isArchived,
+                                              issuesPageBuilder:
+                                                  issuesPageBuilder,
+                                              onEntityTap: onEntityTap,
                                             ),
                                           ),
                                         );
@@ -266,6 +275,7 @@ class _MessageBubble extends HookConsumerWidget {
                                 },
                                 onMentionTap: (pubkey) =>
                                     showUserProfileSheet(context, pubkey),
+                                onEntityTap: onEntityTap,
                               ),
                             ],
                           ),

@@ -15,6 +15,7 @@ void main() {
       SensitiveActionPolicy.disabledByUser,
     );
     expect(community.starterSetupIncomplete, isFalse);
+    expect(community.previewProjects, isFalse);
   });
 
   test('community settings round trip', () {
@@ -23,12 +24,14 @@ void main() {
       name: 'Buzz',
       relayUrl: 'https://relay.test',
       sensitiveActionPolicy: SensitiveActionPolicy.enabled,
+      previewProjects: true,
       starterSetupIncomplete: true,
       addedAt: DateTime.utc(2026, 8, 5),
     );
 
     final roundTrip = Community.fromJson(community.toJson());
     expect(roundTrip.sensitiveActionPolicy, SensitiveActionPolicy.enabled);
+    expect(roundTrip.previewProjects, isTrue);
     expect(roundTrip.starterSetupIncomplete, isTrue);
   });
 }

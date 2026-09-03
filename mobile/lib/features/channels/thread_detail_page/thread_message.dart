@@ -12,6 +12,8 @@ class _ThreadMessage extends HookConsumerWidget {
   final bool isArchived;
   final FocusNode? composerFocusNode;
   final VoidCallback? restoreComposerFocus;
+  final WidgetBuilder? issuesPageBuilder;
+  final ValueChanged<EntityDeepLink>? onEntityTap;
 
   /// Whether this is the message the thread hangs off, which keeps a standing
   /// "+" where replies only get one once they carry a reaction.
@@ -30,6 +32,8 @@ class _ThreadMessage extends HookConsumerWidget {
     this.isThreadHead = false,
     this.composerFocusNode,
     this.restoreComposerFocus,
+    this.issuesPageBuilder,
+    this.onEntityTap,
   });
 
   @override
@@ -246,6 +250,9 @@ class _ThreadMessage extends HookConsumerWidget {
                                                 currentPubkey: currentPubkey,
                                                 isMember: isMember,
                                                 isArchived: isArchived,
+                                                issuesPageBuilder:
+                                                    issuesPageBuilder,
+                                                onEntityTap: onEntityTap,
                                               ),
                                             ),
                                           );
@@ -276,6 +283,7 @@ class _ThreadMessage extends HookConsumerWidget {
                                   },
                                   onMentionTap: (pubkey) =>
                                       showUserProfileSheet(context, pubkey),
+                                  onEntityTap: onEntityTap,
                                 ),
                               ],
                             ),

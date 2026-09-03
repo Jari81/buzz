@@ -1,5 +1,8 @@
 import 'package:buzz/features/settings/settings_page.dart';
+import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_membership_provider.dart';
+import 'package:buzz/shared/community/community_provider.dart';
+import 'package:buzz/shared/community/community_storage.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/app_list.dart';
 import 'package:buzz/shared/widgets/app_list_card.dart';
@@ -7,7 +10,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
+
+import '../../shared/community/community_storage_test.dart';
 
 void main() {
   testWidgets('opens profile edit choices and routes photo directly', (
@@ -152,6 +158,63 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('community-theme-row')));
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('theme-preview-pages')), findsOneWidget);
+  });
+
+  testWidgets('persists Projects in Mobile Preview for this community', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 1600);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final storage = CommunityStorage(secure: FakeSecureStorage());
+    final keys = nostr.Keys.generate();
+    final community = Community(
+      id: 'community-one',
+      name: 'Buzz',
+      relayUrl: 'https://relay.test',
+      pubkey: keys.public,
+      nsec: keys.nsec,
+      addedAt: DateTime.utc(2026, 8, 28),
+    );
+    await storage.save(community);
+    await storage.saveActiveId(community.id);
+    expect(await storage.loadAll(), hasLength(1));
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
+          communityStorageProvider.overrideWithValue(storage),
+          activeCommunityProvider.overrideWith((ref) async => community),
+          currentCommunityRoleProvider.overrideWithValue(
+            const AsyncData<CommunityMemberRole?>(CommunityMemberRole.member),
+          ),
+        ],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: SettingsPage(
+            profileHeader: const SizedBox.shrink(),
+            invitePageBuilder: (_) => const SizedBox.shrink(),
+            identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(SettingsPage)),
+    );
+    await container.read(communityListProvider.future);
+
+    expect(await storage.loadAll(), hasLength(1));
+    expect(find.text('Mobile Preview · This community'), findsOneWidget);
+    expect(find.text('Projects'), findsOneWidget);
+    await tester.tap(find.byType(Switch));
+    await tester.pumpAndSettle();
+
+    expect((await storage.loadAll()).single.previewProjects, isTrue);
   });
 
   testWidgets('uses the native glass close control on iOS', (tester) async {

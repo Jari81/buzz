@@ -12,6 +12,7 @@ class Community {
   final String? pubkey;
   final String? nsec;
   final SensitiveActionPolicy sensitiveActionPolicy;
+  final bool previewProjects;
 
   /// Whether invite-created starter channels still need to be recovered.
   final bool starterSetupIncomplete;
@@ -24,6 +25,7 @@ class Community {
     this.pubkey,
     this.nsec,
     this.sensitiveActionPolicy = SensitiveActionPolicy.disabledByUser,
+    this.previewProjects = false,
     this.starterSetupIncomplete = false,
     required this.addedAt,
   });
@@ -35,6 +37,7 @@ class Community {
     String? nsec,
     SensitiveActionPolicy sensitiveActionPolicy =
         SensitiveActionPolicy.disabledByUser,
+    bool previewProjects = false,
     bool starterSetupIncomplete = false,
   }) {
     return Community(
@@ -44,6 +47,7 @@ class Community {
       pubkey: pubkey,
       nsec: nsec,
       sensitiveActionPolicy: sensitiveActionPolicy,
+      previewProjects: previewProjects,
       starterSetupIncomplete: starterSetupIncomplete,
       addedAt: DateTime.now(),
     );
@@ -55,6 +59,7 @@ class Community {
     Object? pubkey = _sentinel,
     Object? nsec = _sentinel,
     SensitiveActionPolicy? sensitiveActionPolicy,
+    bool? previewProjects,
     bool? starterSetupIncomplete,
   }) {
     return Community(
@@ -65,6 +70,7 @@ class Community {
       nsec: nsec == _sentinel ? this.nsec : nsec as String?,
       sensitiveActionPolicy:
           sensitiveActionPolicy ?? this.sensitiveActionPolicy,
+      previewProjects: previewProjects ?? this.previewProjects,
       starterSetupIncomplete:
           starterSetupIncomplete ?? this.starterSetupIncomplete,
       addedAt: addedAt,
@@ -78,6 +84,7 @@ class Community {
     if (pubkey != null) 'pubkey': pubkey,
     if (nsec != null) 'nsec': nsec,
     'sensitiveActionPolicy': sensitiveActionPolicy.name,
+    'previewProjects': previewProjects,
     'starterSetupIncomplete': starterSetupIncomplete,
     'addedAt': addedAt.toIso8601String(),
   };
@@ -92,6 +99,7 @@ class Community {
       (value) => value.name == json['sensitiveActionPolicy'],
       orElse: () => SensitiveActionPolicy.disabledByUser,
     ),
+    previewProjects: json['previewProjects'] as bool? ?? false,
     starterSetupIncomplete: json['starterSetupIncomplete'] as bool? ?? false,
     addedAt: DateTime.parse(json['addedAt'] as String),
   );

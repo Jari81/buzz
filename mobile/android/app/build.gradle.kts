@@ -11,6 +11,25 @@ val uploadKeystorePath = providers.environmentVariable("BUZZ_ANDROID_UPLOAD_KEYS
 val uploadKeystorePassword = providers.environmentVariable("BUZZ_ANDROID_UPLOAD_KEYSTORE_PASSWORD").orNull
 val uploadKeyAlias = providers.environmentVariable("BUZZ_ANDROID_UPLOAD_KEY_ALIAS").orNull
 val uploadKeyPassword = providers.environmentVariable("BUZZ_ANDROID_UPLOAD_KEY_PASSWORD").orNull
+val testKeystorePath = providers.environmentVariable("BUZZ_ANDROID_TEST_KEYSTORE_PATH").orNull
+val testKeystorePassword = providers.environmentVariable("BUZZ_ANDROID_TEST_KEYSTORE_PASSWORD").orNull
+val testKeyAlias = providers.environmentVariable("BUZZ_ANDROID_TEST_KEY_ALIAS").orNull
+val testKeyPassword = providers.environmentVariable("BUZZ_ANDROID_TEST_KEY_PASSWORD").orNull
+val testSigningValues =
+    mapOf(
+        "BUZZ_ANDROID_TEST_KEYSTORE_PATH" to testKeystorePath,
+        "BUZZ_ANDROID_TEST_KEYSTORE_PASSWORD" to testKeystorePassword,
+        "BUZZ_ANDROID_TEST_KEY_ALIAS" to testKeyAlias,
+        "BUZZ_ANDROID_TEST_KEY_PASSWORD" to testKeyPassword,
+    )
+val missingTestSigningValues = testSigningValues.filterValues { it.isNullOrBlank() }.keys
+val hasTestSigning = missingTestSigningValues.isEmpty()
+if (!hasTestSigning && testSigningValues.values.any { !it.isNullOrBlank() }) {
+    throw GradleException(
+        "Private test signing must provide all BUZZ_ANDROID_TEST_* values. Missing: " +
+            missingTestSigningValues.sorted().joinToString(", "),
+    )
+}
 val uploadSigningValues =
     mapOf(
         "BUZZ_ANDROID_UPLOAD_KEYSTORE_PATH" to uploadKeystorePath,
@@ -131,12 +150,23 @@ android {
                 keyPassword = uploadKeyPassword
             }
         }
+        if (hasTestSigning) {
+            create("privateTest") {
+                storeFile = file(requireNotNull(testKeystorePath))
+                storePassword = testKeystorePassword
+                keyAlias = testKeyAlias
+                keyPassword = testKeyPassword
+            }
+        }
     }
 
     buildTypes {
         debug {
             // Only debug builds take the worktree identity; release/profile
             // keep the production applicationId and label.
+            if (hasTestSigning) {
+                signingConfig = signingConfigs.getByName("privateTest")
+            }
             if (debugIdSuffix != null) {
                 applicationIdSuffix = debugIdSuffix
             }

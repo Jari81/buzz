@@ -23,9 +23,14 @@ import '../../shared/widgets/ios_glass_navigation_action.dart';
 import '../../shared/widgets/immediate_page_route.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import 'theme_picker_page.dart';
+import '../updates/update_downloader.dart';
+import '../updates/update_installer.dart';
+import '../updates/update_manifest.dart';
+import '../updates/update_repository.dart';
 
 part 'settings_page/community_section.dart';
 part 'settings_page/connection_section.dart';
+part 'settings_page/update_section.dart';
 
 Widget _emptyProfileEditPage(BuildContext context) => const SizedBox.shrink();
 
@@ -41,6 +46,11 @@ class SettingsPage extends HookConsumerWidget {
     this.profileEditPageBuilder = _emptyProfileEditPage,
     this.onEditDisplayName,
     this.onEditProfileDescription,
+    this.updateRepository,
+    this.updateDownloader,
+    this.updateInstaller,
+    this.downloadUpdate,
+    this.installUpdate,
   });
 
   /// Header widget displayed at the top of settings.
@@ -60,6 +70,21 @@ class SettingsPage extends HookConsumerWidget {
 
   /// Opens the profile-description editor after the Edit Profile sheet closes.
   final Future<void> Function(BuildContext context)? onEditProfileDescription;
+
+  /// Private release source; tests can supply a deterministic source.
+  final UpdateRepository? updateRepository;
+
+  /// Downloads the manifest-bound APK before the system installer is opened.
+  final UpdateDownloader? updateDownloader;
+
+  /// Deliberately hands the verified APK to Android's package installer.
+  final UpdateInstaller? updateInstaller;
+
+  /// Optional UI-level download action for focused widget tests.
+  final UpdateDownload? downloadUpdate;
+
+  /// Optional UI-level installer action for focused widget tests.
+  final UpdateInstall? installUpdate;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -212,9 +237,24 @@ class SettingsPage extends HookConsumerWidget {
               children: [
                 profileHeader,
                 _CommunitySection(invitePageBuilder: invitePageBuilder),
+                const _MobilePreviewSection(),
                 _ConnectionSection(
                   identityRecoveryPageBuilder: identityRecoveryPageBuilder,
                 ),
+                if (packageInfo.hasData)
+                  _UpdateSection(
+                    repository:
+                        updateRepository ?? UpdateRepository.privateRelease(),
+                    download:
+                        downloadUpdate ??
+                        (updateDownloader ?? UpdateDownloader.privateRelease())
+                            .download,
+                    install:
+                        installUpdate ??
+                        (updateInstaller ?? UpdateInstaller.system()).install,
+                    installedVersionCode:
+                        int.tryParse(packageInfo.data!.buildNumber) ?? 0,
+                  ),
                 const _RemoveCommunitySection(),
               ],
             ),

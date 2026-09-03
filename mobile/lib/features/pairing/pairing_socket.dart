@@ -1,13 +1,20 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../../shared/relay/nostr_models.dart';
 
 const _desktopPairingAuthChallengeGrace = Duration(seconds: 3);
 const _pairingAuthOkTimeout = Duration(seconds: 8);
+
+WebSocketChannel _openPairingWebSocket(Uri uri) => IOWebSocketChannel.connect(
+  uri,
+  pingInterval: PairingSocket.debugPingInterval,
+);
 
 /// Ephemeral WebSocket connection for NIP-AB pairing.
 ///
@@ -23,6 +30,12 @@ class PairingAuthException implements Exception {
 }
 
 class PairingSocket {
+  /// Keepalive must run before mobile networks can reap the idle SAS wait.
+  static const pingInterval = Duration(seconds: 15);
+
+  @visibleForTesting
+  static Duration debugPingInterval = pingInterval;
+
   final String _wsUrl;
   final String _ephemeralPrivkey;
   final void Function(List<dynamic> message) _onMessage;
@@ -46,8 +59,7 @@ class PairingSocket {
     required void Function(Object? error) onDisconnected,
     Duration authChallengeTimeout = _desktopPairingAuthChallengeGrace,
     Duration authResponseTimeout = _pairingAuthOkTimeout,
-    WebSocketChannel Function(Uri uri) channelFactory =
-        WebSocketChannel.connect,
+    WebSocketChannel Function(Uri uri) channelFactory = _openPairingWebSocket,
   }) : _wsUrl = wsUrl,
        _ephemeralPrivkey = ephemeralPrivkey,
        _onMessage = onMessage,

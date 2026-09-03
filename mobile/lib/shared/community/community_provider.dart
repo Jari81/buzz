@@ -152,6 +152,20 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     });
   }
 
+  Future<void> setPreviewProjects(String id, bool enabled) async {
+    final storage = ref.read(communityStorageProvider);
+    final current = state.value ?? [];
+    final index = current.indexWhere((community) => community.id == id);
+    if (index < 0) return;
+
+    final updated = current[index].copyWith(previewProjects: enabled);
+    await storage.save(updated);
+
+    final updatedList = [...current];
+    updatedList[index] = updated;
+    state = AsyncData(updatedList);
+  }
+
   Future<void> renameCommunity(String id, String name) async {
     final storage = ref.read(communityStorageProvider);
     final current = state.value ?? [];

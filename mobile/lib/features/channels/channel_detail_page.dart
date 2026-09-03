@@ -12,6 +12,8 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 import '../../shared/animated_avatar.dart';
+import '../../shared/community/community_provider.dart';
+import '../../shared/deeplink/deep_link.dart';
 import '../../shared/emoji/emoji_burst.dart';
 import '../../shared/huddle/huddle.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
@@ -55,6 +57,7 @@ import 'dm_channel_labels.dart';
 import 'ephemeral_channel_display.dart';
 import 'emoji_picker.dart';
 import 'ime_metrics_settle_observer.dart';
+import 'issue_navigation.dart';
 import 'jump_to_latest_button.dart';
 import 'jump_to_latest_switcher.dart';
 import 'local_message_send_animation_provider.dart';
@@ -252,6 +255,8 @@ class ChannelDetailPage extends HookConsumerWidget {
   final Channel channel;
   final String? initialMessageId;
   final String? initialThreadRootId;
+  final WidgetBuilder? issuesPageBuilder;
+  final ValueChanged<EntityDeepLink>? onEntityTap;
 
   /// How the automatically opened initial thread affects the route stack.
   final InitialThreadRouteBehavior initialThreadRouteBehavior;
@@ -261,6 +266,8 @@ class ChannelDetailPage extends HookConsumerWidget {
     required this.channel,
     this.initialMessageId,
     this.initialThreadRootId,
+    this.issuesPageBuilder,
+    this.onEntityTap,
     this.initialThreadRouteBehavior = InitialThreadRouteBehavior.push,
   });
 
@@ -277,6 +284,13 @@ class ChannelDetailPage extends HookConsumerWidget {
         ref.watch(huddleLifecycleProvider(channel.id)).value ?? const [];
     final sessionStatus = ref.watch(relaySessionProvider).status;
     final readState = ref.watch(readStateProvider);
+    final projectsPreviewEnabled =
+        ref.watch(activeCommunityProvider).value?.previewProjects == true;
+    final issueNavigation = ref.watch(channelIssueNavigationProvider);
+    final effectiveIssuesPageBuilder =
+        issuesPageBuilder ?? issueNavigation?.issuesPageFor(channel.id);
+    final effectiveOnEntityTap =
+        onEntityTap ?? issueNavigation?.entityOpenerFor(context);
     final channelsNotifier = ref.read(channelsProvider.notifier);
     final initialOrdinaryUnreadMessageIdsRef = useRef<Set<String>>(const {});
     final initialOldestOrdinaryUnreadMessageIdRef = useRef<String?>(null);
@@ -618,6 +632,9 @@ class ChannelDetailPage extends HookConsumerWidget {
         ),
         actions: resolvedChannel.isDm
             ? [
+                if (projectsPreviewEnabled &&
+                    effectiveIssuesPageBuilder != null)
+                  _IssuesButton(pageBuilder: effectiveIssuesPageBuilder),
                 if (showsHuddleAction)
                   _HuddleButton(
                     channel: resolvedChannel,
@@ -653,6 +670,9 @@ class ChannelDetailPage extends HookConsumerWidget {
                 ),
               ]
             : [
+                if (projectsPreviewEnabled &&
+                    effectiveIssuesPageBuilder != null)
+                  _IssuesButton(pageBuilder: effectiveIssuesPageBuilder),
                 if (showsComposer)
                   _HuddleButton(
                     channel: resolvedChannel,
@@ -772,6 +792,10 @@ class ChannelDetailPage extends HookConsumerWidget {
                               restoreComposerFocus: showsComposer
                                   ? () => restoreComposerFocus.value?.call()
                                   : null,
+                              issuesPageBuilder: effectiveIssuesPageBuilder,
+                              onEntityTap: projectsPreviewEnabled
+                                  ? effectiveOnEntityTap
+                                  : null,
                             );
                           },
                         ),
@@ -848,4 +872,20 @@ class ChannelDetailPage extends HookConsumerWidget {
       ),
     );
   }
+}
+
+class _IssuesButton extends StatelessWidget {
+  final WidgetBuilder pageBuilder;
+
+  const _IssuesButton({required this.pageBuilder});
+
+  @override
+  Widget build(BuildContext context) => IconButton(
+    color: context.colors.primary,
+    tooltip: 'Issues',
+    icon: const Icon(LucideIcons.circleDot, size: 22),
+    onPressed: () => Navigator.of(
+      context,
+    ).push(MaterialPageRoute<void>(builder: pageBuilder)),
+  );
 }

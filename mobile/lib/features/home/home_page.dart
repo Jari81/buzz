@@ -11,6 +11,7 @@ import '../../shared/theme/theme.dart';
 import '../../shared/widgets/directional_transition_scope.dart';
 import '../../shared/widgets/mobile_tab_footer_backdrop.dart';
 import '../activity/activity_page.dart';
+import '../channels/channel.dart';
 import '../channels/channels_page.dart';
 import '../search/search_page.dart';
 
@@ -18,11 +19,15 @@ class HomePage extends HookConsumerWidget {
   const HomePage({
     required this.settingsPageBuilder,
     required this.hasUnreadInbox,
+    this.channelPageBuilder,
+    this.projectsPageBuilder,
     super.key,
   });
 
   final WidgetBuilder settingsPageBuilder;
   final bool hasUnreadInbox;
+  final Widget Function(Channel channel)? channelPageBuilder;
+  final WidgetBuilder? projectsPageBuilder;
 
   static const double _tabBarHeight = mobileTabBarHeight;
   static const double _tabBarRadius = _tabBarHeight / 2;
@@ -90,6 +95,8 @@ class HomePage extends HookConsumerWidget {
     final pages = [
       ChannelsPage(
         settingsPageBuilder: settingsPageBuilder,
+        channelPageBuilder: channelPageBuilder,
+        projectsPageBuilder: projectsPageBuilder,
         tabReselection: homeReselection,
         onSettingsTransitionProgress: (progress) {
           if (settingsTransitionProgress.value != progress) {

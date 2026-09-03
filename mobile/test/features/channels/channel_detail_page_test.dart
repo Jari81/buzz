@@ -30,8 +30,10 @@ import 'package:buzz/features/channels/date_formatters.dart';
 import 'package:buzz/features/channels/day_divider.dart';
 import 'package:buzz/features/channels/emoji_picker.dart';
 import 'package:buzz/features/channels/ime_metrics_settle_observer.dart';
+import 'package:buzz/features/channels/issue_navigation.dart';
 import 'package:buzz/features/channels/local_message_send_animation_provider.dart';
 import 'package:buzz/features/channels/message_action_backdrop_state.dart';
+import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/message_actions.dart';
 import 'package:buzz/features/channels/mobile_huddle_controller.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
@@ -45,8 +47,10 @@ import 'package:buzz/features/channels/small_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
-import 'package:buzz/features/profile/user_profile_sheet.dart';
+import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
+import 'package:buzz/shared/deeplink/deep_link.dart';
+import 'package:buzz/features/profile/user_profile_sheet.dart';
 import 'package:buzz/shared/emoji/emoji_burst.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/huddle/huddle.dart';
@@ -244,6 +248,10 @@ Widget _buildTestable({
   String? huddleCurrentPubkey,
   http.Client? mediaClient,
   Widget? home,
+  Community? activeCommunity,
+  WidgetBuilder? issuesPageBuilder,
+  ValueChanged<EntityDeepLink>? onEntityTap,
+  ChannelIssueNavigation? issueNavigation,
 }) {
   final resolvedChannel = channel ?? _testChannel;
   final navigatorKey = GlobalKey<NavigatorState>();
@@ -369,6 +377,10 @@ Widget _buildTestable({
       if (huddleCurrentPubkey != null)
         currentPubkeyProvider.overrideWith((ref) => huddleCurrentPubkey),
       appLifecycleProvider.overrideWith(_TestAppLifecycleNotifier.new),
+      if (activeCommunity != null)
+        activeCommunityProvider.overrideWith((ref) async => activeCommunity),
+      if (issueNavigation != null)
+        channelIssueNavigationProvider.overrideWithValue(issueNavigation),
       // Compose bar drafts persist through SharedPreferences.
       savedPrefsProvider.overrideWithValue(_testPrefs),
     ],
@@ -390,6 +402,8 @@ Widget _buildTestable({
             initialMessageId: initialMessageId,
             initialThreadRootId: initialThreadRootId,
             initialThreadRouteBehavior: initialThreadRouteBehavior,
+            issuesPageBuilder: issuesPageBuilder,
+            onEntityTap: onEntityTap,
           ),
     ),
   );
@@ -476,7 +490,213 @@ void main() {
     _testPrefs = await SharedPreferences.getInstance();
   });
 
+  group('ThreadDetailPage', () {
+    testWidgets('uses the composition navigation bridge when opened directly', (
+      tester,
+    ) async {
+      final root = formatTimeline([
+        _textMsg(id: 'root', pubkey: 'alice', content: 'Thread root'),
+      ]).single;
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          activeCommunity: Community(
+            id: 'alpha',
+            name: 'Alpha',
+            relayUrl: 'wss://alpha.example.com',
+            addedAt: DateTime(2025),
+            previewProjects: true,
+          ),
+          issueNavigation: ChannelIssueNavigation(
+            buildIssuesPage: (_, _) => const Scaffold(
+              body: Center(child: Text('Bridged thread issues')),
+            ),
+            openEntity: (_, _) {},
+          ),
+          home: ThreadDetailPage(
+            threadHead: root,
+            allMessages: [root],
+            channelId: _channelId,
+            currentPubkey: null,
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Issues'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Bridged thread issues'), findsOneWidget);
+    });
+
+    testWidgets('restores the thread draft after visiting Issues', (
+      tester,
+    ) async {
+      final root = formatTimeline([
+        _textMsg(id: 'root', pubkey: 'alice', content: 'Thread root'),
+      ]).single;
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          activeCommunity: Community(
+            id: 'alpha',
+            name: 'Alpha',
+            relayUrl: 'wss://alpha.example.com',
+            addedAt: DateTime(2025),
+            previewProjects: true,
+          ),
+          home: ThreadDetailPage(
+            threadHead: root,
+            allMessages: [root],
+            channelId: _channelId,
+            currentPubkey: null,
+            isMember: true,
+            isArchived: false,
+            issuesPageBuilder: (_) => const Scaffold(
+              body: Center(child: Text('Thread issues destination')),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Reply in thread…'));
+      await tester.pump();
+      await tester.enterText(find.byType(TextField), 'thread draft');
+      await tester.tap(find.byTooltip('Issues'));
+      await tester.pumpAndSettle();
+
+      Navigator.of(
+        tester.element(find.text('Thread issues destination')),
+      ).pop();
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('thread draft'));
+      await tester.pump();
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller?.text,
+        'thread draft',
+      );
+    });
+  });
+
   group('ChannelDetailPage', () {
+    testWidgets('uses the composition navigation bridge when opened directly', (
+      tester,
+    ) async {
+      final owner = 'ab' * 32;
+      final issueId = 'cd' * 32;
+      final url = 'buzz://issue?id=$issueId&owner=$owner&d=buzz';
+      EntityDeepLink? tapped;
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [_textMsg(id: 'message', pubkey: 'alice', content: url)],
+          activeCommunity: Community(
+            id: 'alpha',
+            name: 'Alpha',
+            relayUrl: 'wss://alpha.example.com',
+            addedAt: DateTime(2025),
+            previewProjects: true,
+          ),
+          issueNavigation: ChannelIssueNavigation(
+            buildIssuesPage: (_, channelId) => Scaffold(
+              body: Center(child: Text('Bridged issues for $channelId')),
+            ),
+            openEntity: (_, link) => tapped = link,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Issues'));
+      await tester.pumpAndSettle();
+      expect(find.text('Bridged issues for $_channelId'), findsOneWidget);
+
+      Navigator.of(
+        tester.element(find.text('Bridged issues for $_channelId')),
+      ).pop();
+      await tester.pumpAndSettle();
+      final content = tester.widget<MessageContent>(
+        find.byType(MessageContent),
+      );
+      content.onEntityTap!(parseEntityDeepLink(Uri.parse(url))!);
+
+      expect(tapped?.eventId, issueId);
+    });
+
+    testWidgets('routes issue chips through the supplied destination', (
+      tester,
+    ) async {
+      final owner = 'ab' * 32;
+      final issueId = 'cd' * 32;
+      final url = 'buzz://issue?id=$issueId&owner=$owner&d=buzz';
+      EntityDeepLink? tapped;
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [_textMsg(id: 'message', pubkey: 'alice', content: url)],
+          activeCommunity: Community(
+            id: 'alpha',
+            name: 'Alpha',
+            relayUrl: 'wss://alpha.example.com',
+            addedAt: DateTime(2025),
+            previewProjects: true,
+          ),
+          onEntityTap: (value) => tapped = value,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final content = tester.widget<MessageContent>(
+        find.byType(MessageContent),
+      );
+      content.onEntityTap!(parseEntityDeepLink(Uri.parse(url))!);
+      await tester.pump();
+
+      expect(tapped?.type, 'issue');
+      expect(tapped?.eventId, issueId);
+    });
+
+    testWidgets('restores the channel draft after visiting Issues', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          activeCommunity: Community(
+            id: 'alpha',
+            name: 'Alpha',
+            relayUrl: 'wss://alpha.example.com',
+            addedAt: DateTime(2025),
+            previewProjects: true,
+          ),
+          issuesPageBuilder: (_) => const Scaffold(
+            body: Center(child: Text('Channel issues destination')),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Message #general'));
+      await tester.pump();
+      await tester.enterText(find.byType(TextField), 'unfinished draft');
+
+      await tester.tap(find.byTooltip('Issues'));
+      await tester.pumpAndSettle();
+      expect(find.text('Channel issues destination'), findsOneWidget);
+
+      Navigator.of(
+        tester.element(find.text('Channel issues destination')),
+      ).pop();
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('unfinished draft'));
+      await tester.pump();
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller?.text,
+        'unfinished draft',
+      );
+    });
+
     testWidgets('uses the shared 32px masked presence avatar in DM headers', (
       tester,
     ) async {

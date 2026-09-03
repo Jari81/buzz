@@ -21,6 +21,14 @@ import 'features/pairing/pairing_page.dart';
 import 'features/channels/agent_activity/observer_subscription.dart';
 import 'features/channels/channel_detail_page.dart';
 import 'features/channels/deep_link_dispatcher.dart';
+import 'features/channels/issue_navigation.dart';
+import 'features/channels/message_content.dart';
+import 'features/projects/channel_issues_page.dart';
+import 'features/projects/issue_detail_page.dart';
+import 'features/projects/issue_link_page.dart';
+import 'features/projects/project_issue_reducer.dart';
+import 'features/projects/projects_page.dart';
+import 'features/projects/repository_issues_page.dart';
 import 'features/profile/user_status_cache_provider.dart';
 import 'features/profile/settings_profile_header.dart';
 import 'features/profile/profile_edit_page.dart';
@@ -28,6 +36,7 @@ import 'features/profile/profile_text_editor.dart';
 import 'features/settings/settings_page.dart';
 import 'shared/auth/auth.dart';
 import 'shared/deeplink/pending_deep_link_provider.dart';
+import 'shared/deeplink/deep_link.dart';
 import 'shared/emoji/emoji_burst.dart';
 import 'shared/relay/relay.dart';
 import 'shared/read_state/read_state_provider.dart';
@@ -67,6 +76,11 @@ final _inviteRelayConnectedProvider = FutureProvider.family<void, String>((
   });
   await connected.future;
 });
+
+final _channelIssueNavigation = ChannelIssueNavigation(
+  buildIssuesPage: _buildChannelIssuesPage,
+  openEntity: _pushIssueLink,
+);
 
 /// App-level bridge from invite joining to the channels feature.
 class MobileInviteJoinRecovery implements InviteJoinRecovery {
@@ -365,9 +379,16 @@ class App extends HookConsumerWidget {
       // Above the navigator, so a burst keeps playing over a pushed thread page
       // or a modal sheet — the same reason desktop pins its canvas to the
       // viewport rather than to the message row.
-      builder: (context, child) => MobileHuddleShell(
-        navigatorKey: _mobileRootNavigatorKey,
-        child: EmojiBurstOverlay(child: child ?? const SizedBox.shrink()),
+      builder: (context, child) => ProviderScope(
+        overrides: [
+          channelIssueNavigationProvider.overrideWithValue(
+            _channelIssueNavigation,
+          ),
+        ],
+        child: MobileHuddleShell(
+          navigatorKey: _mobileRootNavigatorKey,
+          child: EmojiBurstOverlay(child: child ?? const SizedBox.shrink()),
+        ),
       ),
       home: authState.when(
         loading: () => const _SplashScreen(),
@@ -377,6 +398,8 @@ class App extends HookConsumerWidget {
             child: HomePage(
               settingsPageBuilder: _buildSettingsPage,
               hasUnreadInbox: hasUnreadInbox,
+              projectsPageBuilder: _buildProjectsPage,
+              channelPageBuilder: _buildProjectAwareChannelPage,
             ),
           ),
           _ => const DeepLinkDispatcher(
@@ -390,6 +413,54 @@ class App extends HookConsumerWidget {
 }
 
 Widget _buildSettingsPage(BuildContext context) => const _SettingsPageContent();
+
+Widget _buildProjectsPage(BuildContext context) => ProjectsPage(
+  onRepositoryTap: (repository) => Navigator.of(context).push(
+    MaterialPageRoute<void>(
+      builder: (routeContext) => RepositoryIssuesPage(
+        repository: repository,
+        onIssueTap: (issue) => _pushIssueDetail(routeContext, issue),
+      ),
+    ),
+  ),
+);
+
+Widget _buildProjectAwareChannelPage(Channel channel) =>
+    ChannelDetailPage(channel: channel);
+
+Widget _buildChannelIssuesPage(BuildContext context, String channelId) =>
+    ChannelIssuesPage(
+      channelId: channelId,
+      onIssueTap: (issue) => _pushIssueDetail(context, issue),
+    );
+
+void _pushIssueDetail(BuildContext context, ProjectIssue issue) {
+  Navigator.of(context).push(
+    MaterialPageRoute<void>(
+      builder: (_) =>
+          IssueDetailPage(issue: issue, contentBuilder: _buildProjectContent),
+    ),
+  );
+}
+
+void _pushIssueLink(BuildContext context, EntityDeepLink link) {
+  Navigator.of(context).push(
+    MaterialPageRoute<void>(
+      builder: (_) =>
+          IssueLinkPage(link: link, contentBuilder: _buildProjectContent),
+    ),
+  );
+}
+
+Widget _buildProjectContent(
+  BuildContext context,
+  String content,
+  List<List<String>> tags,
+) => MessageContent(
+  content: content,
+  tags: tags,
+  onEntityTap: (link) => _pushIssueLink(context, link),
+);
 
 class _SettingsPageContent extends ConsumerWidget {
   const _SettingsPageContent();

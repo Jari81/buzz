@@ -23,6 +23,8 @@ class _ThreadMessageList extends StatelessWidget {
   final bool isArchived;
   final FocusNode composerFocusNode;
   final VoidCallback restoreComposerFocus;
+  final WidgetBuilder? issuesPageBuilder;
+  final ValueChanged<EntityDeepLink>? onEntityTap;
   final Map<String, List<TimelineMessage>> childrenByParent;
 
   const _ThreadMessageList({
@@ -48,6 +50,8 @@ class _ThreadMessageList extends StatelessWidget {
     required this.isArchived,
     required this.composerFocusNode,
     required this.restoreComposerFocus,
+    this.issuesPageBuilder,
+    this.onEntityTap,
     required this.childrenByParent,
   });
 
@@ -129,6 +133,8 @@ class _ThreadMessageList extends StatelessWidget {
                             isThreadHead: true,
                             composerFocusNode: composerFocusNode,
                             restoreComposerFocus: restoreComposerFocus,
+                            issuesPageBuilder: issuesPageBuilder,
+                            onEntityTap: onEntityTap,
                           ),
                           Padding(
                             padding: const EdgeInsets.symmetric(
@@ -221,6 +227,8 @@ class _ThreadMessageList extends StatelessWidget {
                             isArchived: isArchived,
                             composerFocusNode: composerFocusNode,
                             restoreComposerFocus: restoreComposerFocus,
+                            issuesPageBuilder: issuesPageBuilder,
+                            onEntityTap: onEntityTap,
                           ),
                           if (nestedSummary != null)
                             _NestedThreadSummaryRow(

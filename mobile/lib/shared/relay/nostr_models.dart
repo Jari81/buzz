@@ -28,6 +28,13 @@ abstract final class EventKind {
   static const readState = 30078;
   static const eventReminder = 30300;
   static const userStatus = 30315;
+  static const issue = 1621;
+  static const issueOpen = 1630;
+  static const issueDone = 1631;
+  static const issueClosed = 1632;
+  static const issueDraft = 1633;
+  static const repositoryAnnouncement = 30617;
+  static const projectAnnouncement = 30621;
   static const dmVisibility = 30622;
   static const streamMessageV2 = 40002;
   static const channelThreadSummary = 39005;

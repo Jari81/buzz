@@ -18,6 +18,8 @@ class _MessageList extends HookConsumerWidget {
   final double composerBottomInset;
   final FocusNode? composerFocusNode;
   final VoidCallback? restoreComposerFocus;
+  final WidgetBuilder? issuesPageBuilder;
+  final ValueChanged<EntityDeepLink>? onEntityTap;
 
   const _MessageList({
     required this.entries,
@@ -37,6 +39,8 @@ class _MessageList extends HookConsumerWidget {
     required this.composerBottomInset,
     this.composerFocusNode,
     this.restoreComposerFocus,
+    this.issuesPageBuilder,
+    this.onEntityTap,
   });
 
   @override
@@ -859,6 +863,8 @@ class _MessageList extends HookConsumerWidget {
                             isArchived: isArchived,
                             composerFocusNode: composerFocusNode,
                             restoreComposerFocus: restoreComposerFocus,
+                            issuesPageBuilder: issuesPageBuilder,
+                            onEntityTap: onEntityTap,
                           ),
                           if (entry.summary != null)
                             _ThreadSummaryRow(

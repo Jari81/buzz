@@ -162,11 +162,15 @@ class ChannelsPage extends HookConsumerWidget {
   const ChannelsPage({
     required this.settingsPageBuilder,
     required this.onSettingsTransitionProgress,
+    this.projectsPageBuilder,
+    this.channelPageBuilder,
     this.tabReselection,
     super.key,
   });
 
   final WidgetBuilder settingsPageBuilder;
+  final WidgetBuilder? projectsPageBuilder;
+  final Widget Function(Channel channel)? channelPageBuilder;
 
   /// Reports Settings route progress so its foreground and Home's background
   /// render from the same timeline.
@@ -245,6 +249,8 @@ class ChannelsPage extends HookConsumerWidget {
     final activeCommunityId = ref.watch(
       activeCommunityProvider.select((v) => v.unwrapPrevious().value?.id),
     );
+    final projectsPreviewEnabled =
+        ref.watch(activeCommunityProvider).value?.previewProjects == true;
     final cachedChannels = useRef<List<Channel>?>(null);
     final lastCommunityId = useRef<String?>(null);
     if (lastCommunityId.value != activeCommunityId) {
@@ -259,7 +265,9 @@ class ChannelsPage extends HookConsumerWidget {
       if (!context.mounted) return;
       await Navigator.of(context).push(
         MaterialPageRoute<void>(
-          builder: (_) => ChannelDetailPage(channel: channel),
+          builder: (_) =>
+              channelPageBuilder?.call(channel) ??
+              ChannelDetailPage(channel: channel),
         ),
       );
     }
@@ -342,6 +350,14 @@ class ChannelsPage extends HookConsumerWidget {
           onTap: openCommunitySwitcher,
         ),
         actions: [
+          if (projectsPreviewEnabled && projectsPageBuilder != null)
+            IconButton(
+              tooltip: 'Projects',
+              onPressed: () => Navigator.of(
+                context,
+              ).push(MaterialPageRoute<void>(builder: projectsPageBuilder!)),
+              icon: const Icon(LucideIcons.folderKanban),
+            ),
           SizedBox(
             width: Grid.xl,
             height: Grid.xl,

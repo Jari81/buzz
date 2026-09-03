@@ -3,11 +3,44 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:buzz/features/pairing/pairing_socket.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 const _privateKey =
     '09b3065e3570a3a4054660dccd66e12774a99a904fdb0ca02dbc6c3136249506';
+
+Future<ServerSocket> _silentAfterHandshakeServer() async {
+  final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+  server.listen((client) {
+    client.listen(
+      (data) {
+        final match = RegExp(
+          r'Sec-WebSocket-Key: (.*)\r\n',
+          caseSensitive: false,
+        ).firstMatch(String.fromCharCodes(data));
+        if (match == null) return;
+        final accept = base64.encode(
+          sha1
+              .convert(
+                utf8.encode(
+                  '${match.group(1)!.trim()}258EAFA5-E914-47DA-95CA-C5AB0DC85B11',
+                ),
+              )
+              .bytes,
+        );
+        client.write(
+          'HTTP/1.1 101 Switching Protocols\r\n'
+          'Upgrade: websocket\r\nConnection: Upgrade\r\n'
+          'Sec-WebSocket-Accept: $accept\r\n\r\n',
+        );
+      },
+      onError: (_) {},
+      onDone: () {},
+    );
+  });
+  return server;
+}
 
 void main() {
   group('PairingSocket', () {
@@ -23,6 +56,36 @@ void main() {
       await socket.connect();
 
       expect(socket.isConnected, isTrue);
+    });
+
+    test('detects a pairing peer that stops answering pings', () async {
+      const testPingInterval = Duration(milliseconds: 150);
+      PairingSocket.debugPingInterval = testPingInterval;
+      addTearDown(() {
+        PairingSocket.debugPingInterval = PairingSocket.pingInterval;
+      });
+
+      final server = await _silentAfterHandshakeServer();
+      addTearDown(server.close);
+      final disconnected = Completer<Object?>();
+      final socket = PairingSocket(
+        wsUrl: 'ws://127.0.0.1:${server.port}',
+        ephemeralPrivkey: _privateKey,
+        onMessage: (_) {},
+        onDisconnected: (error) {
+          if (!disconnected.isCompleted) disconnected.complete(error);
+        },
+        authChallengeTimeout: Duration.zero,
+      );
+      addTearDown(socket.disconnect);
+
+      await socket.connect();
+
+      await expectLater(
+        disconnected.future.timeout(testPingInterval * 4),
+        completes,
+      );
+      expect(socket.isConnected, isFalse);
     });
 
     test('answers an AUTH challenge and requires an accepted OK', () async {

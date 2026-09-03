@@ -41,6 +41,70 @@ void main() {
     );
   });
 
+  test('authorizes only events that satisfy every signed condition', () {
+    final tag = authTag(
+      owner,
+      agent.public,
+      conditions: 'kind=1631&created_at>99&created_at<101',
+    );
+
+    expect(
+      verifiedOaOwnerPubkeyForEvent(
+        [tag],
+        agent.public,
+        kind: 1631,
+        createdAt: 100,
+      ),
+      owner.public.toLowerCase(),
+    );
+    expect(
+      verifiedOaOwnerPubkeyForEvent(
+        [tag],
+        agent.public,
+        kind: 1632,
+        createdAt: 100,
+      ),
+      isNull,
+    );
+    expect(
+      verifiedOaOwnerPubkeyForEvent(
+        [tag],
+        agent.public,
+        kind: 1631,
+        createdAt: 101,
+      ),
+      isNull,
+    );
+  });
+
+  test('rejects an ambiguous profile with multiple auth tags', () {
+    final otherOwner = nostr.Keys.generate();
+    final tags = [
+      authTag(owner, agent.public, conditions: 'kind=1631'),
+      authTag(otherOwner, agent.public, conditions: 'kind=1631'),
+    ];
+
+    expect(verifiedOaOwnerPubkey(tags, agent.public), isNull);
+    expect(
+      verifiedOaOwnerPubkeyForEvent(
+        tags,
+        agent.public,
+        kind: 1631,
+        createdAt: 100,
+      ),
+      isNull,
+    );
+  });
+
+  test('rejects non-canonical uppercase owner and signature hex', () {
+    final canonical = authTag(owner, agent.public);
+    final uppercaseOwner = [...canonical]..[1] = canonical[1].toUpperCase();
+    final uppercaseSignature = [...canonical]..[3] = canonical[3].toUpperCase();
+
+    expect(verifiedOaOwnerPubkey([uppercaseOwner], agent.public), isNull);
+    expect(verifiedOaOwnerPubkey([uppercaseSignature], agent.public), isNull);
+  });
+
   test('rejects a signature over a different agent pubkey', () {
     final otherAgent = nostr.Keys.generate();
     final tag = authTag(owner, otherAgent.public);

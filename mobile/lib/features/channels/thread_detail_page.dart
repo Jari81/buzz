@@ -1,12 +1,15 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 import '../../shared/mentions/agent_identity_provider.dart';
+import '../../shared/community/community_provider.dart';
+import '../../shared/deeplink/deep_link.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
@@ -30,6 +33,7 @@ import 'date_formatters.dart';
 import 'day_divider.dart';
 import 'ime_metrics_settle_observer.dart';
 import 'initial_thread_tail_settle.dart';
+import 'issue_navigation.dart';
 import 'laid_out_viewport.dart';
 import 'jump_to_latest_button.dart';
 import 'jump_to_latest_switcher.dart';
@@ -54,6 +58,7 @@ part 'thread_detail_page/sticky_date.dart';
 part 'thread_detail_helpers.dart';
 part 'thread_detail_page/tail_alignment.dart';
 part 'thread_detail_page/thread_message.dart';
+part 'thread_detail_page/thread_app_bar.dart';
 part 'thread_detail_page/avatar.dart';
 
 const _landingHighlightDuration = Duration(seconds: 3);
@@ -73,6 +78,8 @@ class ThreadDetailPage extends HookConsumerWidget {
   final bool isMember;
   final bool isArchived;
   final String? initialMessageId;
+  final WidgetBuilder? issuesPageBuilder;
+  final ValueChanged<EntityDeepLink>? onEntityTap;
 
   /// Overrides the tail jump only in deterministic lazy-layout tests.
   @visibleForTesting
@@ -87,11 +94,20 @@ class ThreadDetailPage extends HookConsumerWidget {
     required this.isMember,
     required this.isArchived,
     this.initialMessageId,
+    this.issuesPageBuilder,
+    this.onEntityTap,
     this.jumpThreadTailForTesting,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final projectsPreviewEnabled =
+        ref.watch(activeCommunityProvider).value?.previewProjects == true;
+    final issueNavigation = ref.watch(channelIssueNavigationProvider);
+    final effectiveIssuesPageBuilder =
+        issuesPageBuilder ?? issueNavigation?.issuesPageFor(channelId);
+    final effectiveOnEntityTap =
+        onEntityTap ?? issueNavigation?.entityOpenerFor(context);
     final appView = View.of(context);
     final composerDockHeight = useState(0.0);
     final composerFocusNode = useFocusNode();
@@ -823,28 +839,12 @@ class ThreadDetailPage extends HookConsumerWidget {
 
     return FrostedScaffold(
       resizeToAvoidBottomInset: !usesFixedAndroidImeViewport,
-      appBar: FrostedAppBar(
-        leading: usesNativeIosGlassBackButton
-            ? IosGlassNavigationButton(
-                key: const ValueKey('thread-ios-glass-back'),
-                icon: IosGlassNavigationIcon.back,
-                semanticLabel: 'Back',
-                onPressed: () => Navigator.of(context).maybePop(),
-                width: iosGlassChannelHeaderLeadingWidth,
-                buttonCenterX: iosGlassChannelHeaderButtonCenterX,
-                nativeViewSuppressed: messageActionBackdropActive,
-              )
-            : null,
-        iconColor: context.colors.primary,
-        title: Padding(
-          padding: EdgeInsets.only(
-            left: usesNativeIosGlassBackButton
-                ? iosGlassChannelHeaderTitleSpacing
-                : 0,
-          ),
-          child: const Text('Thread', key: ValueKey('thread-app-bar-title')),
-        ),
-        titleStyle: channelTitleTextStyle,
+      appBar: _buildThreadAppBar(
+        context: context,
+        usesNativeIosGlassBackButton: usesNativeIosGlassBackButton,
+        messageActionBackdropActive: messageActionBackdropActive,
+        projectsPreviewEnabled: projectsPreviewEnabled,
+        issuesPageBuilder: effectiveIssuesPageBuilder,
       ),
       body: Stack(
         fit: StackFit.expand,
@@ -907,6 +907,10 @@ class ThreadDetailPage extends HookConsumerWidget {
                   composerFocusNode: composerFocusNode,
                   restoreComposerFocus: () =>
                       restoreComposerFocus.value?.call(),
+                  issuesPageBuilder: effectiveIssuesPageBuilder,
+                  onEntityTap: projectsPreviewEnabled
+                      ? effectiveOnEntityTap
+                      : null,
                   childrenByParent: childrenByParent,
                 ),
               ),
