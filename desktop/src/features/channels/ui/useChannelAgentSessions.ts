@@ -157,6 +157,17 @@ export function getChannelAgentSessionAgents({
       return true;
     }
 
+    // A present channel-membership snapshot is authoritative for relay agents:
+    // only current bot membership may surface their activity in a normal channel.
+    // When the snapshot is unavailable, keep the legacy declared-scope fallback.
+    if (
+      activeChannel.channelType !== "dm" &&
+      agent.agentSource === "relay" &&
+      channelMembers !== undefined
+    ) {
+      return botMemberPubkeys?.has(normalizedPubkey) ?? false;
+    }
+
     if (agent.agentSource === "member-bot") {
       return botMemberPubkeys?.has(normalizedPubkey) ?? matchesDeclaredChannel;
     }

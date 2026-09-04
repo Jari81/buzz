@@ -118,12 +118,60 @@ test("BUZZ-DESKTOP-003: declared channel_ids path still works for normal channel
     activeChannel: stream,
     activeChannelId: stream.id,
     agents,
-    channelMembers: [],
+    channelMembers: undefined,
   });
   assert.deepEqual(
     result.map((agent) => agent.pubkey),
     [CLAUDE_DEV],
   );
+});
+
+test("MyBuzz: current bot membership admits a relay agent without declared channel scope", () => {
+  const stream = streamChannel("dynamic-stream", "dynamic-stream");
+  const result = getChannelAgentSessionAgents({
+    activeChannel: stream,
+    activeChannelId: stream.id,
+    agents: [relayAgent(CLAUDE_HOST, [])],
+    channelMembers: [{ pubkey: CLAUDE_HOST, role: "bot" }],
+  });
+
+  assert.deepEqual(result.map((agent) => agent.pubkey), [CLAUDE_HOST]);
+});
+
+test("MyBuzz: a present empty membership snapshot rejects stale declared channel scope", () => {
+  const stream = streamChannel("dynamic-stream", "dynamic-stream");
+  const result = getChannelAgentSessionAgents({
+    activeChannel: stream,
+    activeChannelId: stream.id,
+    agents: [relayAgent(CLAUDE_HOST, [stream.id])],
+    channelMembers: [],
+  });
+
+  assert.deepEqual(result, []);
+});
+
+test("MyBuzz: non-bot membership does not admit a relay agent to stream activity", () => {
+  const stream = streamChannel("dynamic-stream", "dynamic-stream");
+  const result = getChannelAgentSessionAgents({
+    activeChannel: stream,
+    activeChannelId: stream.id,
+    agents: [relayAgent(CLAUDE_HOST, [stream.id])],
+    channelMembers: [{ pubkey: CLAUDE_HOST, role: "member" }],
+  });
+
+  assert.deepEqual(result, []);
+});
+
+test("MyBuzz: DM eligibility keeps its declared-scope fallback with a membership snapshot", () => {
+  const dm = dmChannel("dm-legacy-scope", [OWNER]);
+  const result = getChannelAgentSessionAgents({
+    activeChannel: dm,
+    activeChannelId: dm.id,
+    agents: [relayAgent(CLAUDE_HOST, [dm.id])],
+    channelMembers: [],
+  });
+
+  assert.deepEqual(result.map((agent) => agent.pubkey), [CLAUDE_HOST]);
 });
 
 test("BUZZ-DESKTOP-003: participant rule applies only to DM channels", () => {
