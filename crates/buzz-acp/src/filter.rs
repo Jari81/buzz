@@ -91,6 +91,12 @@ pub struct SubscriptionRule {
     /// If `true`, the event must contain a `p` tag referencing the agent pubkey.
     #[serde(default)]
     pub require_mention: bool,
+    /// Optional relay-side override for the `#p` filter.
+    ///
+    /// This changes only the NIP-01 wire filter. Local `match_event()`
+    /// enforcement continues to use `require_mention`.
+    #[serde(default)]
+    pub relay_require_mention: Option<bool>,
     /// Optional evalexpr boolean expression for fine-grained filtering.
     #[serde(default)]
     pub filter: Option<String>,
@@ -120,6 +126,7 @@ impl Default for SubscriptionRule {
             channels: ChannelScope::All("all".into()),
             kinds: Vec::new(),
             require_mention: false,
+            relay_require_mention: None,
             filter: None,
             prompt_tag: None,
             compiled_filter: None,
@@ -135,6 +142,7 @@ impl Clone for SubscriptionRule {
             channels: self.channels.clone(),
             kinds: self.kinds.clone(),
             require_mention: self.require_mention,
+            relay_require_mention: self.relay_require_mention,
             filter: self.filter.clone(),
             prompt_tag: self.prompt_tag.clone(),
             compiled_filter: self.compiled_filter.clone(),
@@ -501,6 +509,7 @@ mod tests {
             channels,
             kinds,
             require_mention: mention,
+            relay_require_mention: None,
             filter: filter.map(|s| s.into()),
             prompt_tag: prompt_tag.map(|s| s.into()),
             compiled_filter: None,
@@ -643,14 +652,16 @@ mod tests {
         let event_with_mention = make_event_with_p_tag(9, "hello", agent_pubkey);
         let channel_id = any_channel();
 
-        let rules = vec![make_rule(
+        let mut rule = make_rule(
             "mention-only",
             ChannelScope::All("all".into()),
             vec![],
             true,
             None,
             Some("mentioned"),
-        )];
+        );
+        rule.relay_require_mention = Some(false);
+        let rules = vec![rule];
 
         // Without mention — no match.
         let result = match_event(&event_no_mention, channel_id, &rules, agent_pubkey).await;

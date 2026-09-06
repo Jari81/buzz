@@ -321,6 +321,16 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_INITIAL_MESSAGE")]
     pub initial_message: Option<String>,
 
+    /// Exact kind-1 event ID to recover after a narrowly opted-in MyBuzz restart.
+    /// Must be supplied together with --recovery-state-dir.
+    #[arg(long, env = "BUZZ_ACP_RECOVER_EVENT_ID")]
+    pub recover_event_id: Option<String>,
+
+    /// Existing absolute directory used for the MyBuzz recovery ledger.
+    /// Must be supplied together with --recover-event-id.
+    #[arg(long, env = "BUZZ_ACP_RECOVERY_STATE_DIR")]
+    pub recovery_state_dir: Option<PathBuf>,
+
     #[arg(
         long,
         env = "BUZZ_ACP_SUBSCRIBE",
@@ -491,13 +501,32 @@ pub struct CliArgs {
     pub idle_pool_sleep: u64,
 }
 
-/// Merged NIP-01 subscription filter for a single channel.
-#[derive(Debug, Clone)]
-pub struct ChannelFilter {
+/// One NIP-01 filter object for a channel subscription.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireChannelFilter {
     /// Event kinds to subscribe to. None = wildcard (all kinds).
     pub kinds: Option<Vec<u32>>,
     /// Whether to include `#p` tag filter for agent pubkey.
     pub require_mention: bool,
+}
+
+/// The OR-ed NIP-01 filter objects carried by one channel REQ.
+pub type WireChannelFilters = Vec<WireChannelFilter>;
+
+/// NIP-01 subscription filters for a single channel.
+#[derive(Debug, Clone)]
+pub struct ChannelFilter {
+    /// Every item is serialized into the same channel REQ.
+    pub wire_filters: WireChannelFilters,
+}
+
+fn single_channel_filter(kinds: Option<Vec<u32>>, require_mention: bool) -> ChannelFilter {
+    ChannelFilter {
+        wire_filters: vec![WireChannelFilter {
+            kinds,
+            require_mention,
+        }],
+    }
 }
 
 #[derive(Debug)]
@@ -520,6 +549,10 @@ pub struct Config {
     /// Team-owned instructions layered separately from the agent system prompt.
     pub team_instructions: Option<String>,
     pub initial_message: Option<String>,
+    /// Exact kind-1 event ID eligible for recovery. `None` leaves recovery off.
+    pub recover_event_id: Option<String>,
+    /// Existing directory holding the recovery ledger. `None` leaves recovery off.
+    pub recovery_state_dir: Option<PathBuf>,
     pub subscribe_mode: SubscribeMode,
     pub dedup_mode: DedupMode,
     pub multiple_event_handling: MultipleEventHandling,
@@ -657,6 +690,43 @@ fn validate_allowlist(entries: &[String]) -> Result<HashSet<String>, ConfigError
         validated.insert(trimmed);
     }
     Ok(validated)
+}
+
+fn is_lower_hex64(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Validate the deliberately opt-in MyBuzz recovery pair without touching disk.
+///
+/// Generic deployments retain no recovery behavior unless a launcher supplies
+/// both values. Directory creation and ledger permission checks belong to the
+/// recovery module so config parsing remains side-effect free.
+fn validate_recovery_opt_in(
+    event_id: Option<String>,
+    state_dir: Option<PathBuf>,
+) -> Result<(Option<String>, Option<PathBuf>), ConfigError> {
+    match (event_id, state_dir) {
+        (None, None) => Ok((None, None)),
+        (Some(event_id), Some(state_dir)) => {
+            if !is_lower_hex64(&event_id) {
+                return Err(ConfigError::ConfigFile(
+                    "--recover-event-id must be exactly 64 lowercase hexadecimal characters".into(),
+                ));
+            }
+            if !state_dir.is_absolute() || state_dir.starts_with("/tmp") {
+                return Err(ConfigError::ConfigFile(
+                    "--recovery-state-dir must be absolute and outside /tmp".into(),
+                ));
+            }
+            Ok((Some(event_id), Some(state_dir)))
+        }
+        _ => Err(ConfigError::ConfigFile(
+            "--recover-event-id and --recovery-state-dir must be supplied together".into(),
+        )),
+    }
 }
 
 /// Validate the `--multiple-event-handling` / `--dedup` combination.
@@ -925,6 +995,9 @@ impl Config {
 
         let agent_args = normalize_agent_args(&agent_command, args.agent_args);
 
+        let (recover_event_id, recovery_state_dir) =
+            validate_recovery_opt_in(args.recover_event_id, args.recovery_state_dir)?;
+
         if let Some(ref channels) = args.channels {
             for ch in channels {
                 if ch.parse::<Uuid>().is_err() {
@@ -1091,6 +1164,8 @@ impl Config {
                 .filter(|value| !value.is_empty())
                 .map(str::to_string),
             initial_message: args.initial_message,
+            recover_event_id,
+            recovery_state_dir,
             subscribe_mode: args.subscribe,
             dedup_mode: args.dedup,
             multiple_event_handling: args.multiple_event_handling,
@@ -1142,8 +1217,13 @@ impl Config {
             modes.sort();
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
+        let recovery_detail = match (&self.recover_event_id, &self.recovery_state_dir) {
+            (None, None) => " recovery=off",
+            (Some(_), Some(_)) => " recovery=enabled",
+            _ => " recovery=invalid",
+        };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1166,6 +1246,7 @@ impl Config {
             self.permission_mode,
             respond_to_detail,
             allowed_respond_to_detail,
+            recovery_detail,
         )
     }
 }
@@ -1233,6 +1314,12 @@ pub fn load_rules(path: &std::path::Path) -> Result<Vec<SubscriptionRule>, Confi
                 }
             }
         }
+        if rule.relay_require_mention == Some(false) && rule.kinds.is_empty() {
+            return Err(ConfigError::ConfigFile(format!(
+                "rule '{}': relay_require_mention=false requires explicit kinds",
+                rule.name
+            )));
+        }
         // Validate channel scope — catch typos like "ALL" or "All" early.
         if let crate::filter::ChannelScope::All(ref s) = rule.channels {
             if s != "all" {
@@ -1284,10 +1371,7 @@ pub fn resolve_channel_filters(
             for ch in &target_channels {
                 result.insert(
                     *ch,
-                    ChannelFilter {
-                        kinds: Some(kinds.clone()),
-                        require_mention,
-                    },
+                    single_channel_filter(Some(kinds.clone()), require_mention),
                 );
             }
         }
@@ -1295,46 +1379,14 @@ pub fn resolve_channel_filters(
             for ch in &target_channels {
                 result.insert(
                     *ch,
-                    ChannelFilter {
-                        kinds: config.kinds_override.clone(),
-                        require_mention: false,
-                    },
+                    single_channel_filter(config.kinds_override.clone(), false),
                 );
             }
         }
         SubscribeMode::Config => {
             for ch in discovered_channels {
-                let mut merged_kinds: Option<Vec<u32>> = Some(vec![]);
-                let mut require_mention = true;
-                let mut has_rule = false;
-
-                for rule in rules {
-                    if !rule_applies_to_channel(rule, *ch) {
-                        continue;
-                    }
-                    has_rule = true;
-                    if rule.kinds.is_empty() {
-                        merged_kinds = None;
-                    } else if let Some(ref mut kinds) = merged_kinds {
-                        for k in &rule.kinds {
-                            if !kinds.contains(k) {
-                                kinds.push(*k);
-                            }
-                        }
-                    }
-                    if !rule.require_mention {
-                        require_mention = false;
-                    }
-                }
-
-                if has_rule {
-                    result.insert(
-                        *ch,
-                        ChannelFilter {
-                            kinds: merged_kinds,
-                            require_mention,
-                        },
-                    );
+                if let Some(wire_filters) = resolve_config_wire_filters(*ch, rules) {
+                    result.insert(*ch, ChannelFilter { wire_filters });
                 }
             }
         }
@@ -1377,58 +1429,117 @@ pub fn resolve_dynamic_channel_filter(
     }
 
     match config.subscribe_mode {
-        SubscribeMode::Mentions => Some(ChannelFilter {
-            kinds: Some(config.kinds_override.clone().unwrap_or_else(|| {
+        SubscribeMode::Mentions => Some(single_channel_filter(
+            Some(config.kinds_override.clone().unwrap_or_else(|| {
                 vec![
                     KIND_STREAM_MESSAGE,
                     KIND_WORKFLOW_APPROVAL_REQUESTED,
                     KIND_STREAM_REMINDER,
                 ]
             })),
-            require_mention: !config.no_mention_filter,
-        }),
-        SubscribeMode::All => Some(ChannelFilter {
-            kinds: config.kinds_override.clone(),
-            require_mention: false,
-        }),
-        SubscribeMode::Config => {
-            // Same merge logic as resolve_channel_filters() Config branch:
-            // evaluate ALL rules against this specific channel (including
-            // channel-specific rules, not just ChannelScope::All).
-            let mut merged_kinds: Option<Vec<u32>> = Some(vec![]);
-            let mut require_mention = true;
-            let mut has_rule = false;
+            !config.no_mention_filter,
+        )),
+        SubscribeMode::All => Some(single_channel_filter(config.kinds_override.clone(), false)),
+        SubscribeMode::Config => resolve_config_wire_filters(channel_id, rules)
+            .map(|wire_filters| ChannelFilter { wire_filters }),
+    }
+}
 
-            for rule in rules {
-                if !rule_applies_to_channel(rule, channel_id) {
-                    continue;
-                }
-                has_rule = true;
-                if rule.kinds.is_empty() {
-                    merged_kinds = None;
-                } else if let Some(ref mut kinds) = merged_kinds {
-                    for k in &rule.kinds {
-                        if !kinds.contains(k) {
-                            kinds.push(*k);
-                        }
-                    }
-                }
-                if !rule.require_mention {
-                    require_mention = false;
-                }
-            }
+/// Compile the matching config rules into the OR-ed wire filters for one channel.
+///
+/// With no explicit relay override, this calls the legacy merge unchanged and
+/// emits exactly one filter. Once any matching rule explicitly overrides relay
+/// mention behavior, unoverridden rules retain their one legacy-derived group
+/// while overridden rules are grouped by their explicit relay behavior.
+fn resolve_config_wire_filters(
+    channel_id: Uuid,
+    rules: &[SubscriptionRule],
+) -> Option<WireChannelFilters> {
+    let matching: Vec<&SubscriptionRule> = rules
+        .iter()
+        .filter(|rule| rule_applies_to_channel(rule, channel_id))
+        .collect();
+    if matching.is_empty() {
+        return None;
+    }
 
-            if !has_rule {
-                // No rules match — don't subscribe. Consistent with
-                // resolve_channel_filters() which omits unmatched channels.
-                return None;
-            }
+    if matching
+        .iter()
+        .all(|rule| rule.relay_require_mention.is_none())
+    {
+        return Some(vec![legacy_wire_filter(&matching)]);
+    }
 
-            Some(ChannelFilter {
-                kinds: merged_kinds,
-                require_mention,
-            })
+    let legacy_rules: Vec<&SubscriptionRule> = matching
+        .iter()
+        .copied()
+        .filter(|rule| rule.relay_require_mention.is_none())
+        .collect();
+    let mut wire_filters = if legacy_rules.is_empty() {
+        Vec::new()
+    } else {
+        vec![legacy_wire_filter(&legacy_rules)]
+    };
+
+    for rule in matching
+        .iter()
+        .copied()
+        .filter(|rule| rule.relay_require_mention.is_some())
+    {
+        let relay_require_mention = rule.relay_require_mention.unwrap_or_default();
+        let candidate = WireChannelFilter {
+            kinds: (!rule.kinds.is_empty()).then(|| rule.kinds.clone()),
+            require_mention: relay_require_mention,
+        };
+        if let Some(existing) = wire_filters
+            .iter_mut()
+            .find(|filter| filter.require_mention == relay_require_mention)
+        {
+            merge_wire_filter(existing, candidate);
+        } else {
+            wire_filters.push(candidate);
         }
+    }
+
+    Some(wire_filters)
+}
+
+/// The pre-override config merge, intentionally retained byte-for-byte in
+/// behavior for all configurations that do not opt into an override.
+fn legacy_wire_filter(rules: &[&SubscriptionRule]) -> WireChannelFilter {
+    let mut kinds = Some(vec![]);
+    let mut require_mention = true;
+    for rule in rules {
+        if rule.kinds.is_empty() {
+            kinds = None;
+        } else if let Some(merged_kinds) = &mut kinds {
+            for kind in &rule.kinds {
+                if !merged_kinds.contains(kind) {
+                    merged_kinds.push(*kind);
+                }
+            }
+        }
+        if !rule.require_mention {
+            require_mention = false;
+        }
+    }
+    WireChannelFilter {
+        kinds,
+        require_mention,
+    }
+}
+
+fn merge_wire_filter(target: &mut WireChannelFilter, incoming: WireChannelFilter) {
+    match (&mut target.kinds, incoming.kinds) {
+        (Some(target_kinds), Some(incoming_kinds)) => {
+            for kind in incoming_kinds {
+                if !target_kinds.contains(&kind) {
+                    target_kinds.push(kind);
+                }
+            }
+        }
+        (_, None) => target.kinds = None,
+        (None, Some(_)) => {}
     }
 }
 
@@ -1466,6 +1577,8 @@ mod tests {
             system_prompt: None,
             team_instructions: None,
             initial_message: None,
+            recover_event_id: None,
+            recovery_state_dir: None,
             subscribe_mode: mode,
             dedup_mode: DedupMode::Queue,
             multiple_event_handling: MultipleEventHandling::Queue,
@@ -1510,6 +1623,7 @@ mod tests {
             channels,
             kinds,
             require_mention: mention,
+            relay_require_mention: None,
             filter: None,
             prompt_tag: None,
             compiled_filter: None,
@@ -1526,6 +1640,8 @@ mod tests {
         assert_eq!(result.len(), 2);
         for ch in &channels {
             let f = result.get(ch).expect("channel should be present");
+            assert_eq!(f.wire_filters.len(), 1);
+            let f = &f.wire_filters[0];
             assert!(f.require_mention, "mentions mode requires mention");
             let kinds = f.kinds.as_ref().expect("should have kinds");
             assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_MESSAGE));
@@ -1542,7 +1658,7 @@ mod tests {
         let result = resolve_channel_filters(&config, &channels, &[]);
 
         let f = result.get(&channels[0]).unwrap();
-        assert_eq!(f.kinds.as_ref().unwrap(), &[1, 7]);
+        assert_eq!(f.wire_filters[0].kinds.as_ref().unwrap(), &[1, 7]);
     }
 
     #[test]
@@ -1553,7 +1669,7 @@ mod tests {
         let result = resolve_channel_filters(&config, &channels, &[]);
 
         let f = result.get(&channels[0]).unwrap();
-        assert!(!f.require_mention);
+        assert!(!f.wire_filters[0].require_mention);
     }
 
     #[test]
@@ -1791,10 +1907,10 @@ mod tests {
         for ch in &channels {
             let f = result.get(ch).unwrap();
             assert!(
-                f.kinds.is_none(),
+                f.wire_filters[0].kinds.is_none(),
                 "all mode with no override = wildcard kinds"
             );
-            assert!(!f.require_mention);
+            assert!(!f.wire_filters[0].require_mention);
         }
     }
 
@@ -1806,7 +1922,7 @@ mod tests {
         let result = resolve_channel_filters(&config, &channels, &[]);
 
         let f = result.get(&channels[0]).unwrap();
-        assert_eq!(f.kinds.as_ref().unwrap(), &[9, 7]);
+        assert_eq!(f.wire_filters[0].kinds.as_ref().unwrap(), &[9, 7]);
     }
 
     #[test]
@@ -1842,8 +1958,8 @@ mod tests {
         let result = resolve_channel_filters(&config, &[ch], &rules);
         assert_eq!(result.len(), 1);
         let f = result.get(&ch).unwrap();
-        assert_eq!(f.kinds.as_ref().unwrap(), &[9]);
-        assert!(!f.require_mention);
+        assert_eq!(f.wire_filters[0].kinds.as_ref().unwrap(), &[9]);
+        assert!(!f.wire_filters[0].require_mention);
     }
 
     #[test]
@@ -1877,11 +1993,14 @@ mod tests {
         let result = resolve_channel_filters(&config, &[ch], &rules);
         let f = result.get(&ch).unwrap();
         // Kinds should be the union: [9, 7].
-        let kinds = f.kinds.as_ref().expect("should have merged kinds");
+        let kinds = f.wire_filters[0]
+            .kinds
+            .as_ref()
+            .expect("should have merged kinds");
         assert!(kinds.contains(&9));
         assert!(kinds.contains(&7));
         // require_mention should be false (most permissive wins).
-        assert!(!f.require_mention);
+        assert!(!f.wire_filters[0].require_mention);
     }
 
     #[test]
@@ -1897,7 +2016,10 @@ mod tests {
         let result = resolve_channel_filters(&config, &[ch], &rules);
         let f = result.get(&ch).unwrap();
         // Once any rule has empty kinds (wildcard), merged result is None (wildcard).
-        assert!(f.kinds.is_none(), "wildcard should propagate");
+        assert!(
+            f.wire_filters[0].kinds.is_none(),
+            "wildcard should propagate"
+        );
     }
 
     #[test]
@@ -1929,7 +2051,119 @@ mod tests {
 
         let result = resolve_channel_filters(&config, &[ch], &rules);
         let f = result.get(&ch).unwrap();
-        assert!(!f.require_mention, "most permissive (false) should win");
+        assert!(
+            !f.wire_filters[0].require_mention,
+            "most permissive (false) should win"
+        );
+    }
+
+    #[test]
+    fn config_relay_mention_override_splits_wire_filters_for_startup_and_dynamic_channels() {
+        let config = test_config(SubscribeMode::Config);
+        let mybuzz = Uuid::parse_str("70114f25-3b91-46f5-bea8-7125dbb18336").unwrap();
+        let mut signed_handoffs = make_rule(
+            "mybuzz-signed-handoffs",
+            ChannelScope::List(vec![mybuzz.to_string()]),
+            vec![1],
+            true,
+        );
+        signed_handoffs.relay_require_mention = Some(false);
+        let rules = vec![
+            make_rule(
+                "mentioned-messages",
+                ChannelScope::All("all".into()),
+                vec![9, 46010, 40007],
+                true,
+            ),
+            signed_handoffs,
+        ];
+
+        let startup = resolve_channel_filters(&config, &[mybuzz], &rules)
+            .remove(&mybuzz)
+            .expect("MyBuzz channel should be subscribed");
+        let dynamic = resolve_dynamic_channel_filter(&config, mybuzz, &rules)
+            .expect("MyBuzz channel should be dynamically subscribed");
+
+        let expected = vec![
+            WireChannelFilter {
+                kinds: Some(vec![9, 46010, 40007]),
+                require_mention: true,
+            },
+            WireChannelFilter {
+                kinds: Some(vec![1]),
+                require_mention: false,
+            },
+        ];
+        assert_eq!(startup.wire_filters, expected);
+        assert_eq!(dynamic.wire_filters, startup.wire_filters);
+    }
+
+    #[test]
+    fn config_parses_relay_mention_override_without_changing_local_requirement() {
+        let parsed: TomlConfig = toml::from_str(
+            r#"
+                [[rules]]
+                name = "mybuzz-signed-handoffs"
+                channels = ["70114f25-3b91-46f5-bea8-7125dbb18336"]
+                kinds = [1]
+                require_mention = true
+                relay_require_mention = false
+            "#,
+        )
+        .expect("parse config rule");
+
+        assert_eq!(parsed.rules.len(), 1);
+        assert!(parsed.rules[0].require_mention);
+        assert_eq!(parsed.rules[0].relay_require_mention, Some(false));
+    }
+
+    #[test]
+    fn load_rules_rejects_an_unmentioned_relay_override_without_explicit_kinds() {
+        let dir = std::env::temp_dir().join("buzz-acp-test-relay-override-wildcard");
+        let path = dir.join("rules.toml");
+        std::fs::create_dir_all(&dir).expect("temporary directory");
+        std::fs::write(
+            &path,
+            r#"
+                [[rules]]
+                name = "unsafe-unmentioned-receipt"
+                channels = ["70114f25-3b91-46f5-8ea8-7125dbb18336"]
+                require_mention = true
+                relay_require_mention = false
+            "#,
+        )
+        .expect("write config");
+
+        let error = load_rules(&path).expect_err("wildcard relay override must fail closed");
+        assert!(error
+            .to_string()
+            .contains("relay_require_mention=false requires explicit kinds"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn config_without_relay_override_keeps_the_legacy_single_wire_filter() {
+        let config = test_config(SubscribeMode::Config);
+        let channel = Uuid::new_v4();
+        let rules = vec![
+            make_rule("strict", ChannelScope::All("all".into()), vec![9], true),
+            make_rule("lax", ChannelScope::All("all".into()), vec![7], false),
+        ];
+
+        let startup = resolve_channel_filters(&config, &[channel], &rules)
+            .remove(&channel)
+            .expect("channel should be subscribed");
+        let dynamic = resolve_dynamic_channel_filter(&config, channel, &rules)
+            .expect("channel should be dynamically subscribed");
+
+        assert_eq!(
+            startup.wire_filters,
+            vec![WireChannelFilter {
+                kinds: Some(vec![9, 7]),
+                require_mention: false,
+            }]
+        );
+        assert_eq!(dynamic.wire_filters, startup.wire_filters);
     }
 
     #[test]
@@ -2838,6 +3072,72 @@ channels = "ALL"
         assert!(
             result.is_ok(),
             "from_args should accept any mode when allowed list is unset: {result:?}"
+        );
+    }
+
+    // --- MyBuzz recovery opt-in ---
+
+    #[test]
+    fn recovery_opt_in_requires_a_pair_and_a_safe_absolute_state_directory() {
+        let event_id = "a".repeat(64);
+        let uppercase_event_id = "A".repeat(64);
+        let valid_dir = std::path::PathBuf::from(format!(
+            "/var/lib/buzz-acp-recovery-config-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let valid_dir_arg = valid_dir.to_string_lossy().into_owned();
+        assert!(
+            !valid_dir.exists(),
+            "config parsing must not pre-create state"
+        );
+
+        for argv in [
+            vec!["--recover-event-id", event_id.as_str()],
+            vec!["--recovery-state-dir", "/var/lib/mybuzz-recovery"],
+            vec![
+                "--recover-event-id",
+                uppercase_event_id.as_str(),
+                "--recovery-state-dir",
+                "/var/lib/mybuzz-recovery",
+            ],
+            vec![
+                "--recover-event-id",
+                event_id.as_str(),
+                "--recovery-state-dir",
+                "relative/state",
+            ],
+            vec![
+                "--recover-event-id",
+                event_id.as_str(),
+                "--recovery-state-dir",
+                "/tmp/mybuzz-recovery",
+            ],
+        ] {
+            let mut full_argv = vec!["buzz-acp", "--private-key", TEST_PRIVATE_KEY];
+            full_argv.extend(argv);
+            let args = CliArgs::try_parse_from(full_argv).expect("clap should parse recovery args");
+            assert!(
+                Config::from_args(args).is_err(),
+                "invalid recovery opt-in must fail closed"
+            );
+        }
+
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--recover-event-id",
+            event_id.as_str(),
+            "--recovery-state-dir",
+            valid_dir_arg.as_str(),
+        ])
+        .expect("clap should parse valid recovery args");
+        let config = Config::from_args(args).expect("valid recovery opt-in should parse");
+        assert!(!valid_dir.exists(), "config parsing must not create state");
+        assert_eq!(config.recover_event_id.as_deref(), Some(event_id.as_str()));
+        assert_eq!(
+            config.recovery_state_dir.as_deref(),
+            Some(valid_dir.as_path())
         );
     }
 

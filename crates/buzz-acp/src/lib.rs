@@ -4,6 +4,12 @@ mod acp;
 mod config;
 mod engram_fetch;
 mod filter;
+mod mybuzz_handoff;
+#[allow(
+    dead_code,
+    reason = "later recovery slices own durable dispatch and terminal transitions"
+)]
+mod mybuzz_recovery;
 mod observer;
 mod pool;
 mod pool_lifecycle;
@@ -15,6 +21,9 @@ mod usage;
 pub use usage::TurnUsage;
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs::File;
+use std::io::Read;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,14 +44,15 @@ use config::{
 };
 use filter::SubscriptionRule;
 use futures_util::FutureExt;
-use nostr::{PublicKey, ToBech32};
+use nostr::{EventId, PublicKey, ToBech32};
 use pool::{
     AgentPool, ControlSignal, IdleSwitchResult, OwnedAgent, PromptContext, PromptOutcome,
     PromptResult, PromptSource, SessionState, TimeoutKind,
 };
 use pool_lifecycle::PoolLifecycle;
 use queue::{CancelReason, EventQueue, FlushBatch, QueuedEvent, ThreadTags};
-use relay::{HarnessRelay, RelayEventPublisher};
+use relay::{HarnessRelay, RecoveryRelayStatus, RelayEventPublisher};
+use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -65,6 +75,161 @@ const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 /// Timeout for `buzz-acp authenticate`. Browser-based vendor auth can require
 /// human interaction, so it must not share the short probe timeout.
 const AUTHENTICATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+#[cfg(test)]
+mod recovery_ingress_tests {
+    use super::*;
+
+    const EVENT_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const OTHER_EVENT_ID: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    #[test]
+    fn binary_fingerprint_hashes_the_exact_file_bytes() {
+        let path = std::env::temp_dir().join(format!("buzz-acp-fingerprint-{}", Uuid::new_v4()));
+        std::fs::write(&path, b"running-binary-bytes").expect("write test binary bytes");
+
+        let fingerprint = sha256_file_hex(&path).expect("hash test binary bytes");
+
+        std::fs::remove_file(&path).expect("remove test binary bytes");
+        assert_eq!(
+            fingerprint,
+            "baaaa98d84635c9cc9ed9e7132241058f4d2fd6f07974f7cc4e120580fa6affb"
+        );
+    }
+
+    #[test]
+    fn recovery_ingress_allows_only_relay_provenanced_configured_event() {
+        let configured = EventId::from_hex(EVENT_ID).expect("valid configured event id");
+
+        assert_eq!(
+            classify_recovery_ingress(None, Some(&configured)),
+            RecoveryIngressEligibility::Normal
+        );
+        assert_eq!(
+            classify_recovery_ingress(Some(OTHER_EVENT_ID), Some(&configured)),
+            RecoveryIngressEligibility::Drop
+        );
+        assert_eq!(
+            classify_recovery_ingress(Some(EVENT_ID), None),
+            RecoveryIngressEligibility::Drop
+        );
+        assert_eq!(
+            classify_recovery_ingress(Some(EVENT_ID), Some(&configured)),
+            RecoveryIngressEligibility::Recovery(configured)
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryIngressEligibility {
+    Normal,
+    Recovery(EventId),
+    Drop,
+}
+
+/// Classify recovery provenance without mutating the ledger or queue.
+///
+/// Only the relay's exact-ID recovery route sets `recovery_event_id`; an
+/// ordinary live subscription receipt remains normal even when its ID matches.
+fn classify_recovery_ingress(
+    recovery_event_id: Option<&str>,
+    configured_event_id: Option<&EventId>,
+) -> RecoveryIngressEligibility {
+    let Some(recovery_event_id) = recovery_event_id else {
+        return RecoveryIngressEligibility::Normal;
+    };
+    let (Some(configured_event_id), Ok(recovery_event_id)) =
+        (configured_event_id, EventId::from_hex(recovery_event_id))
+    else {
+        return RecoveryIngressEligibility::Drop;
+    };
+    if recovery_event_id == *configured_event_id {
+        RecoveryIngressEligibility::Recovery(recovery_event_id)
+    } else {
+        RecoveryIngressEligibility::Drop
+    }
+}
+
+/// SHA-256 of exact file bytes, kept separate so tests never hash `/proc/self/exe`.
+fn sha256_file_hex(path: &Path) -> std::io::Result<String> {
+    let mut file = File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+/// Fingerprint the currently running harness binary, never its source or path.
+fn running_binary_fingerprint() -> std::io::Result<String> {
+    sha256_file_hex(Path::new("/proc/self/exe"))
+}
+
+fn recovery_status_requires_attempt(status: RecoveryRelayStatus) -> bool {
+    matches!(
+        status,
+        RecoveryRelayStatus::Eose
+            | RecoveryRelayStatus::Closed
+            | RecoveryRelayStatus::Backpressured
+            | RecoveryRelayStatus::SendFailed
+            | RecoveryRelayStatus::WrongEventId
+            | RecoveryRelayStatus::WrongChannel
+    )
+}
+
+fn expire_recovery_at_deadline(ledger: &mut mybuzz_recovery::RecoveryLedger, now_unix_secs: u64) {
+    if ledger.state().phase == mybuzz_recovery::RecoveryPhase::Pending
+        && now_unix_secs >= ledger.state().deadline_unix_secs
+    {
+        if let Err(error) = ledger.start_attempt(now_unix_secs) {
+            tracing::error!(%error, "MyBuzz recovery deadline could not be persisted");
+        }
+    }
+}
+
+/// Persist one bounded recovery attempt immediately before its exact-ID REQ.
+/// Terminal evidence is always consulted through the established reader first.
+async fn schedule_recovery_attempt(
+    relay: &HarnessRelay,
+    event_id: &EventId,
+    ledger: &mut mybuzz_recovery::RecoveryLedger,
+    now_unix_secs: u64,
+) {
+    match ledger
+        .try_mark_terminal_from_evidence(Path::new(mybuzz_recovery::MYBUZZ_TERMINAL_EVIDENCE_ROOT))
+    {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            tracing::warn!(%error, "MyBuzz terminal evidence rejected before recovery attempt");
+            return;
+        }
+    }
+    if ledger.state().phase != mybuzz_recovery::RecoveryPhase::Pending {
+        return;
+    }
+    match ledger.start_attempt(now_unix_secs) {
+        Ok(mybuzz_recovery::AttemptStart::Started) => {
+            if let Err(error) = relay
+                .subscribe_exact_mybuzz_recovery(event_id.to_hex())
+                .await
+            {
+                tracing::warn!(
+                    status = ?RecoveryRelayStatus::SendFailed,
+                    %error,
+                    "MyBuzz recovery command failed after persisted attempt"
+                );
+            }
+        }
+        Ok(mybuzz_recovery::AttemptStart::Exhausted) => {}
+        Err(error) => tracing::error!(%error, "MyBuzz recovery attempt could not be persisted"),
+    }
+}
 
 /// Publish a kind:20001 presence update event via the WebSocket connection.
 ///
@@ -1929,6 +2094,96 @@ async fn tokio_main() -> Result<()> {
 
     tracing::info!("buzz-acp starting: {}", config.summary());
 
+    // Recovery remains opt-in. Open this one persistent ledger exactly once;
+    // any fingerprint or state failure disables only the recovery slice.
+    let mut configured_recovery_event_id = None;
+    let mut recovery_ledger: Option<mybuzz_recovery::RecoveryLedger> = match (
+        &config.recover_event_id,
+        &config.recovery_state_dir,
+    ) {
+        (None, None) => None,
+        (Some(event_id), Some(state_dir)) => {
+            match (EventId::from_hex(event_id), running_binary_fingerprint()) {
+                (Ok(parsed_event_id), Ok(source_fingerprint)) => {
+                    configured_recovery_event_id = Some(parsed_event_id);
+                    let now_unix_secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    match mybuzz_recovery::RecoveryLedger::open_or_create(
+                        state_dir,
+                        event_id,
+                        &source_fingerprint,
+                        now_unix_secs,
+                    ) {
+                        Ok(mut ledger) => {
+                            if matches!(
+                                ledger.state().phase,
+                                mybuzz_recovery::RecoveryPhase::Claimed
+                                    | mybuzz_recovery::RecoveryPhase::Dispatched
+                            ) {
+                                match ledger.try_mark_terminal_from_evidence(std::path::Path::new(
+                                    mybuzz_recovery::MYBUZZ_TERMINAL_EVIDENCE_ROOT,
+                                )) {
+                                    Ok(true) => Some(ledger),
+                                    Ok(false) | Err(_) => {
+                                        if let Err(error) =
+                                            ledger.mark_restart_without_terminal_readback()
+                                        {
+                                            tracing::error!(
+                                                recovery_event_id = %event_id,
+                                                %error,
+                                                "MyBuzz recovery restart ambiguity could not be persisted; recovery disabled fail closed"
+                                            );
+                                            None
+                                        } else {
+                                            tracing::error!(
+                                                recovery_event_id = %event_id,
+                                                "MyBuzz recovery was claimed or dispatched before restart without valid terminal evidence; marked ambiguous"
+                                            );
+                                            Some(ledger)
+                                        }
+                                    }
+                                }
+                            } else {
+                                Some(ledger)
+                            }
+                        }
+                        Err(error) => {
+                            tracing::error!(
+                                recovery_event_id = %event_id,
+                                %error,
+                                "MyBuzz recovery ledger refused to open; recovery disabled fail closed"
+                            );
+                            None
+                        }
+                    }
+                }
+                (Err(error), _) => {
+                    tracing::error!(
+                        recovery_event_id = %event_id,
+                        %error,
+                        "MyBuzz recovery event ID could not be parsed; recovery disabled fail closed"
+                    );
+                    None
+                }
+                (_, Err(error)) => {
+                    tracing::error!(
+                        %error,
+                        "running binary fingerprint failed; MyBuzz recovery disabled fail closed"
+                    );
+                    None
+                }
+            }
+        }
+        _ => {
+            tracing::error!(
+                "incomplete MyBuzz recovery configuration; recovery disabled fail closed"
+            );
+            None
+        }
+    };
+
     let observer = config
         .relay_observer
         .then(observer::ObserverHandle::in_process);
@@ -1977,6 +2232,7 @@ async fn tokio_main() -> Result<()> {
         HarnessRelay::connect(&config.relay_url, &config.keys, &pubkey_hex, relay_auth_tag)
             .await
             .map_err(|e| anyhow::anyhow!("relay connect error: {e}"))?;
+    let mut recovery_status_rx = relay.take_recovery_status_rx();
 
     // Tell the relay background task the watermark so it can use
     // `since = watermark - 5s` on the first REQ instead of `since=now`.
@@ -1987,6 +2243,17 @@ async fn tokio_main() -> Result<()> {
     }
 
     tracing::info!("connected to relay at {}", config.relay_url);
+
+    if let (Some(event_id), Some(ledger)) = (
+        configured_recovery_event_id.as_ref(),
+        recovery_ledger.as_mut(),
+    ) {
+        let now_unix_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        schedule_recovery_attempt(&relay, event_id, ledger, now_unix_secs).await;
+    }
 
     relay
         .subscribe_membership_notifications()
@@ -2082,6 +2349,7 @@ async fn tokio_main() -> Result<()> {
                     ]
                 }),
                 require_mention: !config.no_mention_filter,
+                relay_require_mention: None,
                 filter: None,
                 compiled_filter: None,
                 consecutive_timeouts: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -2094,6 +2362,7 @@ async fn tokio_main() -> Result<()> {
                 channels: filter::ChannelScope::All("all".into()),
                 kinds: config.kinds_override.clone().unwrap_or_default(),
                 require_mention: false,
+                relay_require_mention: None,
                 filter: None,
                 compiled_filter: None,
                 consecutive_timeouts: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -2414,6 +2683,24 @@ async fn tokio_main() -> Result<()> {
         if pool_ready && last_maintenance.elapsed() >= maintenance_interval {
             last_maintenance = std::time::Instant::now();
             queue.compact_expired_state();
+            if let Some(ledger) = recovery_ledger.as_mut() {
+                match ledger.try_mark_terminal_from_evidence(std::path::Path::new(
+                    mybuzz_recovery::MYBUZZ_TERMINAL_EVIDENCE_ROOT,
+                )) {
+                    Ok(true) => tracing::info!("MyBuzz recovery terminal evidence recorded"),
+                    Ok(false) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, "MyBuzz terminal evidence rejected during maintenance")
+                    }
+                }
+                expire_recovery_at_deadline(
+                    ledger,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                );
+            }
 
             // Slot refill: spawn background tasks for empty slots whose
             // circuit breaker allows it. spawn_and_init runs off the main
@@ -2445,9 +2732,13 @@ async fn tokio_main() -> Result<()> {
             // called on relay events or pool results, neither of which
             // arrive when the channel is silent.
             if queue.has_flushable_work() {
-                for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                {
+                for (channel_id, thread_tags) in dispatch_pending_with_recovery(
+                    &mut pool,
+                    &mut queue,
+                    &ctx,
+                    &mut last_activity,
+                    recovery_ledger.as_mut(),
+                ) {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -2494,9 +2785,13 @@ async fn tokio_main() -> Result<()> {
         // this, batches requeued during crash recovery sit idle until the
         // next relay event arrives — which can be minutes on quiet channels.
         if respawn_collected {
-            for (channel_id, thread_tags) in
-                dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-            {
+            for (channel_id, thread_tags) in dispatch_pending_with_recovery(
+                &mut pool,
+                &mut queue,
+                &ctx,
+                &mut last_activity,
+                recovery_ledger.as_mut(),
+            ) {
                 typing_channels.insert(channel_id, thread_tags);
             }
         }
@@ -2590,6 +2885,25 @@ async fn tokio_main() -> Result<()> {
                             relay_observer_control_rx = None;
                             tracing::warn!("relay observer control channel closed");
                         }
+                    }
+                    None
+                }
+                recovery_status = async {
+                    match recovery_status_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let _ = result_rx;
+                    match recovery_status {
+                        Some(status) if recovery_status_requires_attempt(status) => {
+                            if let (Some(event_id), Some(ledger)) = (configured_recovery_event_id.as_ref(), recovery_ledger.as_mut()) {
+                                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                                schedule_recovery_attempt(&relay, event_id, ledger, now).await;
+                            }
+                        }
+                        Some(_) => {}
+                        None => recovery_status_rx = None,
                     }
                     None
                 }
@@ -2871,6 +3185,92 @@ async fn tokio_main() -> Result<()> {
                                     continue;
                                 }
                             };
+                            // MyBuzz is the one deliberate exception to generic
+                            // kind-1 ingress. The regular author and local-p
+                            // gates above still run first; malformed receipts
+                            // stop here before they can mutate the queue.
+                            let test_ready_receipt = if mybuzz_handoff::is_strict_mybuzz_kind_one(
+                                buzz_event.channel_id,
+                                buzz_event.event.kind.as_u16(),
+                            ) {
+                                match mybuzz_handoff::strict_test_ready(
+                                    &buzz_event.event,
+                                    buzz_event.channel_id,
+                                    &pubkey_hex,
+                                ) {
+                                    Ok(receipt) => Some(receipt),
+                                    Err(reason) => {
+                                        tracing::warn!(
+                                            channel_id = %buzz_event.channel_id,
+                                            event_id = %buzz_event.event.id.to_hex(),
+                                            ?reason,
+                                            "dropping malformed MyBuzz test-ready receipt before queue"
+                                        );
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                None
+                            };
+                            let recovery_event_id = match classify_recovery_ingress(
+                                buzz_event.recovery_event_id.as_deref(),
+                                configured_recovery_event_id.as_ref(),
+                            ) {
+                                RecoveryIngressEligibility::Normal => None,
+                                RecoveryIngressEligibility::Recovery(event_id) => {
+                                    let Some(receipt) = test_ready_receipt.as_ref() else {
+                                        tracing::error!(
+                                            recovery_event_id = %event_id.to_hex(),
+                                            "dropping MyBuzz recovery receipt without strict candidate binding"
+                                        );
+                                        continue;
+                                    };
+                                    match recovery_ledger.as_mut() {
+                                        Some(ledger) => {
+                                            if let Err(error) = ledger.bind_candidate(receipt.clone()) {
+                                                tracing::error!(
+                                                    recovery_event_id = %event_id.to_hex(),
+                                                    %error,
+                                                    "dropping MyBuzz recovery receipt because candidate binding failed"
+                                                );
+                                                continue;
+                                            }
+                                            match ledger.claim() {
+                                                Ok(mybuzz_recovery::ClaimResult::Claimed) => Some(event_id),
+                                                Ok(mybuzz_recovery::ClaimResult::AlreadyClaimed) => {
+                                                    tracing::warn!(
+                                                        recovery_event_id = %event_id.to_hex(),
+                                                        "dropping already-claimed MyBuzz recovery receipt before queue"
+                                                    );
+                                                    continue;
+                                                }
+                                                Err(error) => {
+                                                    tracing::error!(
+                                                        recovery_event_id = %event_id.to_hex(),
+                                                        %error,
+                                                        "dropping MyBuzz recovery receipt because ledger claim failed"
+                                                    );
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                        None => {
+                                            tracing::error!(
+                                                recovery_event_id = %event_id.to_hex(),
+                                                "dropping MyBuzz recovery receipt without an open ledger"
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                }
+                                RecoveryIngressEligibility::Drop => {
+                                    tracing::warn!(
+                                        event_id = %buzz_event.event.id.to_hex(),
+                                        "dropping invalid or unconfigured MyBuzz recovery provenance before queue"
+                                    );
+                                    continue;
+                                }
+                            };
                             // Capture author pubkey before queue.push() moves
                             // buzz_event.event (needed for mode gate below).
                             let author_hex = buzz_event.event.pubkey.to_hex();
@@ -2887,12 +3287,30 @@ async fn tokio_main() -> Result<()> {
                             // backed payload) so the cost is negligible.
                             let event_for_steer = buzz_event.event.clone();
                             let prompt_tag_for_steer = prompt_tag.clone();
+                            let claimed_recovery = recovery_event_id.is_some();
                             let accepted = queue.push(QueuedEvent {
                                 channel_id: buzz_event.channel_id,
                                 event: buzz_event.event,
                                 received_at: std::time::Instant::now(),
                                 prompt_tag,
+                                recovery_event_id,
                             });
+                            if claimed_recovery && !accepted {
+                                match recovery_ledger.as_mut() {
+                                    Some(ledger) => {
+                                        if let Err(error) = ledger.mark_ambiguous("queue-rejected") {
+                                            tracing::error!(
+                                                %error,
+                                                "claimed MyBuzz recovery queue rejection could not be persisted"
+                                            );
+                                        }
+                                    }
+                                    None => tracing::error!(
+                                        "claimed MyBuzz recovery queue rejection has no ledger"
+                                    ),
+                                }
+                                continue;
+                            }
                             // 👀 — immediate "seen" reaction, only if the event
                             // was actually queued (not dropped by DedupMode::Drop).
                             // Fire-and-forget: on rare fast-failure paths the
@@ -2951,7 +3369,13 @@ async fn tokio_main() -> Result<()> {
                             }
                             if pool_ready {
                                 for (channel_id, thread_tags) in
-                                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                                    dispatch_pending_with_recovery(
+                        &mut pool,
+                        &mut queue,
+                        &ctx,
+                        &mut last_activity,
+                        recovery_ledger.as_mut(),
+                    )
                                 {
                                     typing_channels.insert(channel_id, thread_tags);
                                 }
@@ -2963,6 +3387,16 @@ async fn tokio_main() -> Result<()> {
                                 tracing::error!("relay background task is gone: {e} — exiting");
                                 tokio::time::sleep(Duration::from_secs(1)).await;
                                 break;
+                            }
+                            if let (Some(event_id), Some(ledger)) = (
+                                configured_recovery_event_id.as_ref(),
+                                recovery_ledger.as_mut(),
+                            ) {
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs();
+                                schedule_recovery_attempt(&relay, event_id, ledger, now).await;
                             }
                         }
                     }
@@ -3051,7 +3485,13 @@ async fn tokio_main() -> Result<()> {
                     } else if queue.has_flushable_work() {
                         tracing::debug!("heartbeat_skipped_events");
                         for (channel_id, thread_tags) in
-                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                            dispatch_pending_with_recovery(
+                        &mut pool,
+                        &mut queue,
+                        &ctx,
+                        &mut last_activity,
+                        recovery_ledger.as_mut(),
+                    )
                         {
                             typing_channels.insert(channel_id, thread_tags);
                         }
@@ -3118,7 +3558,7 @@ async fn tokio_main() -> Result<()> {
                 if let PromptSource::Channel(ch) = &result.source {
                     typing_channels.remove(ch);
                 }
-                if handle_prompt_result(
+                if handle_prompt_result_with_recovery(
                     &mut pool,
                     &mut queue,
                     &config,
@@ -3130,6 +3570,7 @@ async fn tokio_main() -> Result<()> {
                     &mut respawn_tasks,
                     observer.clone(),
                     Some(&ctx.rest_client),
+                    recovery_ledger.as_mut(),
                 ) == LoopAction::Exit
                 {
                     break;
@@ -3145,19 +3586,24 @@ async fn tokio_main() -> Result<()> {
                     &respawn_tx,
                     &mut respawn_tasks,
                     observer.clone(),
+                    recovery_ledger.as_mut(),
                 ) == LoopAction::Exit
                 {
                     break;
                 }
-                for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                {
+                for (channel_id, thread_tags) in dispatch_pending_with_recovery(
+                    &mut pool,
+                    &mut queue,
+                    &ctx,
+                    &mut last_activity,
+                    recovery_ledger.as_mut(),
+                ) {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
             Some(PoolEvent::Panic(join_error)) => {
                 tracing::error!("agent task panicked: {join_error}");
-                recover_panicked_agent(
+                recover_panicked_agent_with_recovery(
                     &mut pool,
                     &mut queue,
                     &config,
@@ -3169,14 +3615,19 @@ async fn tokio_main() -> Result<()> {
                     &respawn_tx,
                     &mut respawn_tasks,
                     observer.clone(),
+                    recovery_ledger.as_mut(),
                 );
                 if pool.live_count() == 0 && !any_respawn_in_flight(&crash_history) {
                     tracing::error!("all agents dead — exiting");
                     break;
                 }
-                for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                {
+                for (channel_id, thread_tags) in dispatch_pending_with_recovery(
+                    &mut pool,
+                    &mut queue,
+                    &ctx,
+                    &mut last_activity,
+                    recovery_ledger.as_mut(),
+                ) {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -3329,9 +3780,13 @@ async fn tokio_main() -> Result<()> {
                 // tear down the in-flight task; on its completion the
                 // queue drains. We still try here in case the in-flight
                 // task has already returned.
-                for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                {
+                for (channel_id, thread_tags) in dispatch_pending_with_recovery(
+                    &mut pool,
+                    &mut queue,
+                    &ctx,
+                    &mut last_activity,
+                    recovery_ledger.as_mut(),
+                ) {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -3357,9 +3812,13 @@ async fn tokio_main() -> Result<()> {
                             "ready",
                             None,
                         );
-                        for (channel_id, thread_tags) in
-                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                        {
+                        for (channel_id, thread_tags) in dispatch_pending_with_recovery(
+                            &mut pool,
+                            &mut queue,
+                            &ctx,
+                            &mut last_activity,
+                            recovery_ledger.as_mut(),
+                        ) {
                             typing_channels.insert(channel_id, thread_tags);
                         }
                     }
@@ -3629,6 +4088,7 @@ fn try_native_steer(
         event,
         prompt_tag: prompt_tag.clone(),
         received_at: std::time::Instant::now(),
+        recovery_event_id: None,
     };
     let event_block = queue::format_event_block(channel_id, None, &be, None);
     let body = format!("{header}\n\n[Buzz event: {prompt_tag}]\n{event_block}\n\n{closing}");
@@ -3687,12 +4147,91 @@ fn try_native_steer(
 
 // ── dispatch_pending ──────────────────────────────────────────────────────────
 
-/// Flush queued work to available agents.
-fn dispatch_pending(
+fn batch_is_empty(batch: &FlushBatch) -> bool {
+    batch.events.is_empty() && batch.cancelled_events.is_empty()
+}
+
+/// Removes recovery work before any retry, drop, or visible failure path.
+/// Recovery has no terminal-evidence reader yet, so every non-success outcome
+/// is irrecoverably ambiguous rather than eligible for automatic redelivery.
+fn split_recovery_for_failure(
+    batch: FlushBatch,
+    recovery_ledger: Option<&mut mybuzz_recovery::RecoveryLedger>,
+    failure_class: &'static str,
+) -> FlushBatch {
+    let (normal, recovery_event_ids) = batch.split_recovery_events();
+    if !recovery_event_ids.is_empty() {
+        match recovery_ledger {
+            Some(ledger) => {
+                match ledger.try_mark_terminal_from_evidence(std::path::Path::new(
+                    mybuzz_recovery::MYBUZZ_TERMINAL_EVIDENCE_ROOT,
+                )) {
+                    Ok(true) => {
+                        tracing::info!(
+                            ?recovery_event_ids,
+                            "terminal evidence closed recovery before failure handling"
+                        );
+                    }
+                    Ok(false) | Err(_) => {
+                        if let Err(error) = ledger.mark_ambiguous(failure_class) {
+                            tracing::error!(
+                                ?recovery_event_ids,
+                                %error,
+                                failure_class,
+                                "failed to persist recovery ambiguity; receipt remains fail closed"
+                            );
+                        }
+                    }
+                }
+            }
+            None => tracing::error!(
+                ?recovery_event_ids,
+                failure_class,
+                "dropping recovery receipt without a ledger before failure handling"
+            ),
+        }
+    }
+    normal
+}
+
+/// Makes the dispatch transition durable before the task can observe recovery
+/// work. If that persistence is unavailable, only normal co-batched work may
+/// proceed; recovery receipts are dropped rather than redispatched.
+fn prepare_recovery_dispatch(
+    batch: FlushBatch,
+    recovery_ledger: Option<&mut mybuzz_recovery::RecoveryLedger>,
+) -> FlushBatch {
+    let has_recovery = batch
+        .events
+        .iter()
+        .chain(&batch.cancelled_events)
+        .any(|event| event.recovery_event_id.is_some());
+    if !has_recovery {
+        return batch;
+    }
+    match recovery_ledger {
+        Some(ledger) => match ledger.mark_dispatched() {
+            Ok(()) => batch,
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    "recovery dispatch transition failed; dropping recovery receipt before spawn"
+                );
+                split_recovery_for_failure(batch, Some(ledger), "dispatch-transition")
+            }
+        },
+        None => split_recovery_for_failure(batch, None, "dispatch-transition"),
+    }
+}
+
+/// Flush queued work, carrying the optional recovery ledger through the
+/// dispatch boundary.
+fn dispatch_pending_with_recovery(
     pool: &mut AgentPool,
     queue: &mut EventQueue,
     ctx: &Arc<PromptContext>,
     last_activity: &mut tokio::time::Instant,
+    mut recovery_ledger: Option<&mut mybuzz_recovery::RecoveryLedger>,
 ) -> Vec<(Uuid, ThreadTags)> {
     let mut dispatched_channels = Vec::new();
     loop {
@@ -3700,7 +4239,13 @@ fn dispatch_pending(
             Some(b) => b,
             None => break,
         };
+        let batch = prepare_recovery_dispatch(batch, recovery_ledger.as_deref_mut());
         let channel_id = batch.channel_id;
+        if batch_is_empty(&batch) {
+            queue.mark_complete(channel_id);
+            tracing::warn!(channel_id = %channel_id, "recovery-only batch dropped without spawning an agent");
+            continue;
+        }
         let typing_scope = batch
             .events
             .last()
@@ -3836,7 +4381,38 @@ fn spawn_failure_notice(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn handle_prompt_result(
+    pool: &mut AgentPool,
+    queue: &mut EventQueue,
+    config: &Config,
+    result: PromptResult,
+    heartbeat_in_flight: &mut bool,
+    removed_channels: &HashSet<Uuid>,
+    crash_history: &mut [SlotCircuit],
+    respawn_tx: &mpsc::Sender<RespawnResult>,
+    respawn_tasks: &mut tokio::task::JoinSet<()>,
+    observer: Option<observer::ObserverHandle>,
+    rest_client: Option<&relay::RestClient>,
+) -> LoopAction {
+    handle_prompt_result_with_recovery(
+        pool,
+        queue,
+        config,
+        result,
+        heartbeat_in_flight,
+        removed_channels,
+        crash_history,
+        respawn_tx,
+        respawn_tasks,
+        observer,
+        rest_client,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_prompt_result_with_recovery(
     pool: &mut AgentPool,
     queue: &mut EventQueue,
     config: &Config,
@@ -3848,6 +4424,7 @@ fn handle_prompt_result(
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
     rest_client: Option<&relay::RestClient>,
+    recovery_ledger: Option<&mut mybuzz_recovery::RecoveryLedger>,
 ) -> LoopAction {
     let before = pool.task_map().len();
     let agent_index = result.agent.index;
@@ -3891,9 +4468,30 @@ fn handle_prompt_result(
     // every retry starts at attempt 1 — defeating exponential backoff and
     // dead-letter protection.
     if let Some(batch) = result.batch.take() {
+        let failure_class = if removed_channels.contains(&batch.channel_id) {
+            "removed-channel"
+        } else {
+            match &result.outcome {
+                PromptOutcome::Cancelled => "cancelled",
+                PromptOutcome::CancelDrainTimeout(_) | PromptOutcome::Timeout(_) => "timeout",
+                PromptOutcome::AgentExited | PromptOutcome::Error(_) => {
+                    if matches!(&result.outcome, PromptOutcome::Error(error) if is_auth_error(error))
+                    {
+                        "auth-error"
+                    } else {
+                        "agent-error"
+                    }
+                }
+                PromptOutcome::Ok(_) => "agent-error",
+            }
+        };
+        let batch = match &result.outcome {
+            PromptOutcome::Ok(_) => batch,
+            _ => split_recovery_for_failure(batch, recovery_ledger, failure_class),
+        };
         // Don't requeue batches for channels the agent was removed from —
         // those events are stale and should be silently dropped.
-        if !removed_channels.contains(&batch.channel_id) {
+        if !batch_is_empty(&batch) && !removed_channels.contains(&batch.channel_id) {
             if matches!(
                 result.outcome,
                 PromptOutcome::Cancelled | PromptOutcome::CancelDrainTimeout(_)
@@ -4225,6 +4823,7 @@ fn handle_prompt_result(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn recover_panicked_agent(
     pool: &mut AgentPool,
     queue: &mut EventQueue,
@@ -4238,6 +4837,37 @@ fn recover_panicked_agent(
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
 ) {
+    recover_panicked_agent_with_recovery(
+        pool,
+        queue,
+        config,
+        join_error,
+        heartbeat_in_flight,
+        removed_channels,
+        typing_channels,
+        crash_history,
+        respawn_tx,
+        respawn_tasks,
+        observer,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recover_panicked_agent_with_recovery(
+    pool: &mut AgentPool,
+    queue: &mut EventQueue,
+    config: &Config,
+    join_error: tokio::task::JoinError,
+    heartbeat_in_flight: &mut bool,
+    removed_channels: &HashSet<Uuid>,
+    typing_channels: &mut HashMap<Uuid, ThreadTags>,
+    crash_history: &mut [SlotCircuit],
+    respawn_tx: &mpsc::Sender<RespawnResult>,
+    respawn_tasks: &mut tokio::task::JoinSet<()>,
+    observer: Option<observer::ObserverHandle>,
+    recovery_ledger: Option<&mut mybuzz_recovery::RecoveryLedger>,
+) {
     let task_id = join_error.id();
     let Some(meta) = pool.task_map_mut().remove(&task_id) else {
         tracing::error!("panic for unknown task {task_id:?} — bug");
@@ -4248,12 +4878,18 @@ fn recover_panicked_agent(
     // Requeue BEFORE mark_complete (same rationale as handle_prompt_result).
     if let Some(batch) = meta.recoverable_batch {
         if let Some(ch) = meta.channel_id {
-            if !removed_channels.contains(&ch) {
+            let failure_class = if removed_channels.contains(&ch) {
+                "removed-channel"
+            } else {
+                "panic"
+            };
+            let batch = split_recovery_for_failure(batch, recovery_ledger, failure_class);
+            if !batch_is_empty(&batch) && !removed_channels.contains(&ch) {
                 // Dead-letter on exhaustion is logged inside requeue(); a
                 // panic path has no outcome to report, so no notice here.
                 let _ = queue.requeue(batch);
                 tracing::warn!("requeued batch for panicked agent {i}");
-            } else {
+            } else if !batch_is_empty(&batch) {
                 tracing::debug!(
                     channel_id = %ch,
                     "dropping panicked batch for removed channel"
@@ -4335,11 +4971,12 @@ fn drain_ready_join_results(
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
+    mut recovery_ledger: Option<&mut mybuzz_recovery::RecoveryLedger>,
 ) -> LoopAction {
     while let Some(Some(join_result)) = pool.join_set.join_next().now_or_never() {
         if let Err(join_error) = join_result {
             tracing::error!("agent task panicked: {join_error}");
-            recover_panicked_agent(
+            recover_panicked_agent_with_recovery(
                 pool,
                 queue,
                 config,
@@ -4351,6 +4988,7 @@ fn drain_ready_join_results(
                 respawn_tx,
                 respawn_tasks,
                 observer.clone(),
+                recovery_ledger.as_deref_mut(),
             );
             if pool.live_count() == 0 && !any_respawn_in_flight(crash_history) {
                 return LoopAction::Exit;
@@ -6737,6 +7375,8 @@ mod build_mcp_servers_tests {
             system_prompt: None,
             team_instructions: None,
             initial_message: None,
+            recover_event_id: None,
+            recovery_state_dir: None,
             subscribe_mode: config::SubscribeMode::All,
             dedup_mode: config::DedupMode::Queue,
             multiple_event_handling: config::MultipleEventHandling::Queue,
@@ -6960,6 +7600,8 @@ mod error_outcome_emission_tests {
             system_prompt: None,
             team_instructions: None,
             initial_message: None,
+            recover_event_id: None,
+            recovery_state_dir: None,
             subscribe_mode: config::SubscribeMode::All,
             dedup_mode: config::DedupMode::Queue,
             multiple_event_handling: config::MultipleEventHandling::Queue,
@@ -7546,6 +8188,7 @@ mod error_outcome_emission_tests {
                     event,
                     prompt_tag: "test".into(),
                     received_at: std::time::Instant::now(),
+                    recovery_event_id: None,
                 }],
                 cancelled_events: vec![],
                 cancel_reason: None,
@@ -7653,6 +8296,7 @@ mod error_outcome_emission_tests {
                     event,
                     prompt_tag: "test".into(),
                     received_at: std::time::Instant::now(),
+                    recovery_event_id: None,
                 }],
                 cancelled_events: vec![],
                 cancel_reason: None,
@@ -7773,6 +8417,7 @@ mod error_outcome_emission_tests {
                     .unwrap(),
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
+                recovery_event_id: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -7867,6 +8512,7 @@ mod error_outcome_emission_tests {
                     .unwrap(),
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
+                recovery_event_id: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -7945,6 +8591,7 @@ mod error_outcome_emission_tests {
                 event: original_event.clone(),
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
+                recovery_event_id: None,
             }],
             cancelled_events: vec![],
             cancel_reason: Some(CancelReason::Steer),
@@ -7975,6 +8622,7 @@ mod error_outcome_emission_tests {
             event: new_event.clone(),
             received_at: std::time::Instant::now(),
             prompt_tag: "test".into(),
+            recovery_event_id: None,
         });
         let config = test_config();
         let mut heartbeat_in_flight = false;
@@ -8268,6 +8916,7 @@ mod error_outcome_emission_tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
+                recovery_event_id: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -8354,6 +9003,7 @@ mod error_outcome_emission_tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
+                recovery_event_id: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -8423,6 +9073,140 @@ mod error_outcome_emission_tests {
             1,
             "non-auth application error must preserve the event for retry"
         );
+    }
+}
+
+#[cfg(test)]
+mod recovery_dispatch_failure_tests {
+    use super::*;
+    use crate::queue::BatchEvent;
+    use std::fs;
+    use std::path::PathBuf;
+
+    const FINGERPRINT: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    fn ledger(label: &str) -> (mybuzz_recovery::RecoveryLedger, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "buzz-acp-recovery-dispatch-{label}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&dir).expect("create state directory");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
+                .expect("restrict state directory");
+        }
+        let event_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        (
+            mybuzz_recovery::RecoveryLedger::open_or_create(&dir, event_id, FINGERPRINT, 10)
+                .expect("open ledger"),
+            dir,
+        )
+    }
+
+    fn batch(recovery: bool, normal: bool) -> FlushBatch {
+        let channel_id = Uuid::new_v4();
+        let make = |content: &str, recovery_event_id| BatchEvent {
+            event: nostr::EventBuilder::new(nostr::Kind::Custom(9), content)
+                .sign_with_keys(&nostr::Keys::generate())
+                .expect("sign event"),
+            prompt_tag: "test".into(),
+            received_at: std::time::Instant::now(),
+            recovery_event_id,
+        };
+        let recovery_event = make(
+            "recovery",
+            if recovery {
+                Some(
+                    nostr::EventId::from_hex(
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    )
+                    .expect("event id"),
+                )
+            } else {
+                None
+            },
+        );
+        let normal_event = make("normal", None);
+        FlushBatch {
+            channel_id,
+            events: match (recovery, normal) {
+                (true, true) => vec![recovery_event, normal_event],
+                (true, false) => vec![recovery_event],
+                (false, true) => vec![normal_event],
+                (false, false) => vec![],
+            },
+            cancelled_events: vec![],
+            cancel_reason: None,
+        }
+    }
+
+    #[test]
+    fn dispatch_transition_is_durable_before_recovery_work_can_run() {
+        let (mut ledger, dir) = ledger("transition");
+        assert_eq!(
+            ledger.claim().expect("claim"),
+            mybuzz_recovery::ClaimResult::Claimed
+        );
+        let ready = prepare_recovery_dispatch(batch(true, true), Some(&mut ledger));
+        assert_eq!(
+            ledger.state().phase,
+            mybuzz_recovery::RecoveryPhase::Dispatched
+        );
+        assert_eq!(ready.events.len(), 2, "normal co-batch order is retained");
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn recovery_only_failure_is_ambiguous_and_leaves_no_work_to_requeue() {
+        let (mut ledger, dir) = ledger("only-failure");
+        assert_eq!(
+            ledger.claim().expect("claim"),
+            mybuzz_recovery::ClaimResult::Claimed
+        );
+        ledger.mark_dispatched().expect("mark dispatched");
+        let normal = split_recovery_for_failure(batch(true, false), Some(&mut ledger), "timeout");
+        assert!(batch_is_empty(&normal));
+        assert_eq!(
+            ledger.state().phase,
+            mybuzz_recovery::RecoveryPhase::Ambiguous
+        );
+        assert_eq!(ledger.state().failure_class.as_deref(), Some("timeout"));
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn mixed_failures_drop_recovery_and_preserve_normal_order_for_every_class() {
+        for class in [
+            "cancelled",
+            "timeout",
+            "agent-error",
+            "auth-error",
+            "panic",
+            "removed-channel",
+        ] {
+            let (mut ledger, dir) = ledger(class);
+            assert_eq!(
+                ledger.claim().expect("claim"),
+                mybuzz_recovery::ClaimResult::Claimed
+            );
+            ledger.mark_dispatched().expect("mark dispatched");
+            let normal = split_recovery_for_failure(batch(true, true), Some(&mut ledger), class);
+            assert_eq!(normal.events.len(), 1, "{class}");
+            assert_eq!(normal.events[0].event.content, "normal", "{class}");
+            assert_eq!(
+                ledger.state().phase,
+                mybuzz_recovery::RecoveryPhase::Ambiguous,
+                "{class}"
+            );
+            assert_eq!(
+                ledger.state().failure_class.as_deref(),
+                Some(class),
+                "{class}"
+            );
+            fs::remove_dir_all(dir).ok();
+        }
     }
 }
 

@@ -130,6 +130,9 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::config::ChannelFilter;
+#[cfg(test)]
+use crate::config::WireChannelFilter;
+use crate::mybuzz_recovery::recovery_subscription_frame;
 
 /// Metadata about a channel, populated at discovery time.
 #[derive(Debug, Clone)]
@@ -461,6 +464,9 @@ pub struct BuzzEvent {
     pub channel_id: Uuid,
     /// The underlying Nostr event.
     pub event: Event,
+    /// Exact-ID recovery provenance, absent for normal subscriptions.
+    #[allow(dead_code)] // Consumed by the later recovery ledger-claim slice.
+    pub recovery_event_id: Option<String>,
 }
 
 /// Errors from relay operations.
@@ -489,6 +495,9 @@ pub enum RelayError {
 
     #[error("Unexpected message: {0}")]
     UnexpectedMessage(String),
+
+    #[error("Invalid MyBuzz recovery event ID")]
+    InvalidRecoveryEventId,
 }
 
 impl From<nostr::event::builder::Error> for RelayError {
@@ -528,6 +537,40 @@ enum RelayMessage {
 const MEMBERSHIP_NOTIF_SUB_ID: &str = "membership-notif";
 /// Subscription ID for encrypted owner-to-agent observer control frames.
 const OBSERVER_CONTROL_SUB_ID: &str = "agent-observer-control";
+/// Subscription ID for the single-event MyBuzz recovery query.
+pub const MYBUZZ_RECOVERY_SUB_ID: &str = "mybuzz-recovery-v1";
+
+/// Observable outcomes for isolated exact-ID MyBuzz recovery relay handling.
+///
+/// The recovery path validates the exact event ID and channel tag, and isolates
+/// recovery EVENT/EOSE/CLOSED frames from normal subscription state.
+#[allow(dead_code)] // SendFailed remains reserved for recovery orchestration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryRelayStatus {
+    Eose,
+    Closed,
+    SendFailed,
+    Backpressured,
+    WrongEventId,
+    WrongChannel,
+}
+
+/// Best-effort, bounded reporting for recovery-only outcomes.
+///
+/// Reporting must never block the relay background loop or mutate normal
+/// channel state.
+fn report_recovery_status(
+    status_tx: &mpsc::Sender<RecoveryRelayStatus>,
+    status: RecoveryRelayStatus,
+) {
+    if let Err(error) = status_tx.try_send(status) {
+        warn!(
+            ?status,
+            ?error,
+            "MyBuzz recovery status receiver is unavailable"
+        );
+    }
+}
 
 /// Commands sent from `HarnessRelay` to the background WebSocket task.
 enum RelayCommand {
@@ -547,6 +590,10 @@ enum RelayCommand {
     SubscribeMembership,
     /// Subscribe to encrypted observer control frames addressed to this agent.
     SubscribeObserverControls,
+    /// Subscribe only to one MyBuzz kind-1 event for recovery.
+    #[allow(dead_code)] // Wired by the later recovery orchestration slice.
+    SubscribeExactMyBuzzRecovery { event_id: String },
+
     /// Publish a signed event to the relay (for typing indicators, etc.).
     PublishEvent { event: Box<Event> },
     /// Floor `since` for membership notification replay; events before startup are never re-delivered.
@@ -567,6 +614,8 @@ pub struct HarnessRelay {
     event_rx: mpsc::Receiver<Option<BuzzEvent>>,
     /// Receiver for encrypted observer control events addressed to this agent.
     observer_control_rx: Option<mpsc::Receiver<Event>>,
+    /// Receiver for recovery-only relay outcomes, taken by the ledger owner.
+    recovery_status_rx: Option<mpsc::Receiver<RecoveryRelayStatus>>,
     /// Sender for commands to the background task.
     cmd_tx: mpsc::Sender<RelayCommand>,
     /// HTTP client for HTTP bridge calls.
@@ -641,6 +690,8 @@ impl HarnessRelay {
         let (event_tx, event_rx) = mpsc::channel::<Option<BuzzEvent>>(event_channel_capacity());
         let (observer_control_tx, observer_control_rx) =
             mpsc::channel::<Event>(event_channel_capacity());
+        let (recovery_status_tx, recovery_status_rx) =
+            mpsc::channel::<RecoveryRelayStatus>(event_channel_capacity());
         let (cmd_tx, cmd_rx) = mpsc::channel::<RelayCommand>(CMD_CHANNEL_CAPACITY);
 
         let bg_keys = keys.clone();
@@ -654,6 +705,7 @@ impl HarnessRelay {
                 handshake_buffer,
                 event_tx,
                 observer_control_tx,
+                recovery_status_tx,
                 cmd_rx,
                 bg_keys,
                 bg_relay_url,
@@ -666,6 +718,7 @@ impl HarnessRelay {
         Ok(Self {
             event_rx,
             observer_control_rx: Some(observer_control_rx),
+            recovery_status_rx: Some(recovery_status_rx),
             cmd_tx,
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(10))
@@ -813,9 +866,30 @@ impl HarnessRelay {
         Ok(())
     }
 
+    /// Subscribe to exactly one validated MyBuzz kind-1 event for recovery.
+    ///
+    /// This remains separate from channel subscriptions and only queues the
+    /// fresh, cursor-free exact-ID request defined by the recovery foundation.
+    #[allow(dead_code)] // Called by the later recovery orchestration slice.
+    pub async fn subscribe_exact_mybuzz_recovery(
+        &self,
+        event_id: String,
+    ) -> Result<(), RelayError> {
+        exact_mybuzz_recovery_subscription_frame(&event_id)?;
+        self.cmd_tx
+            .send(RelayCommand::SubscribeExactMyBuzzRecovery { event_id })
+            .await
+            .map_err(|_| RelayError::ConnectionClosed)
+    }
+
     /// Take the observer-control receiver for polling outside this relay object.
     pub fn take_observer_control_rx(&mut self) -> Option<mpsc::Receiver<Event>> {
         self.observer_control_rx.take()
+    }
+
+    /// Take the recovery-only status receiver exactly once.
+    pub fn take_recovery_status_rx(&mut self) -> Option<mpsc::Receiver<RecoveryRelayStatus>> {
+        self.recovery_status_rx.take()
     }
 
     /// Return a cloneable publisher handle for signed relay events.
@@ -1013,6 +1087,11 @@ struct BgState {
     seen_ids: TwoGenDedup,
     /// Per-channel filter used on subscribe (for resubscribe after reconnect).
     active_filters: HashMap<Uuid, ChannelFilter>,
+    /// Pending single-event MyBuzz recovery request, deliberately outside
+    /// normal channel subscription and cursor state.
+    mybuzz_recovery_intent: Option<String>,
+    /// Bounded recovery-only status route. Unit state fixtures leave this absent.
+    recovery_status_tx: Option<mpsc::Sender<RecoveryRelayStatus>>,
     /// Oldest timestamp of a membership notification that was dropped due to
     /// backpressure. If set, reconnect replay must start from this timestamp
     /// (minus skew) to re-deliver the lost event. Reset on successful reconnect.
@@ -1097,6 +1176,8 @@ impl BgState {
             last_seen: HashMap::new(),
             seen_ids: TwoGenDedup::new(SEEN_ID_LIMIT),
             active_filters: HashMap::new(),
+            mybuzz_recovery_intent: None,
+            recovery_status_tx: None,
             membership_dropped_since: None,
             membership_last_seen: None,
             membership_sub_active: false,
@@ -1135,6 +1216,18 @@ impl BgState {
             .or_insert(ts);
 
         true
+    }
+
+    fn report_recovery_status(&self, status: RecoveryRelayStatus) {
+        if let Some(status_tx) = &self.recovery_status_tx {
+            report_recovery_status(status_tx, status);
+        }
+    }
+
+    fn report_recovery_connection_loss(&mut self) {
+        if self.mybuzz_recovery_intent.take().is_some() {
+            self.report_recovery_status(RecoveryRelayStatus::SendFailed);
+        }
     }
 
     /// Compute the `since` timestamp for a channel (re)subscribe.
@@ -1302,6 +1395,9 @@ fn apply_command_to_state(state: &mut BgState, cmd: RelayCommand) {
         RelayCommand::SubscribeObserverControls => {
             state.observer_control_sub_active = true;
         }
+        RelayCommand::SubscribeExactMyBuzzRecovery { event_id } => {
+            state.mybuzz_recovery_intent = Some(event_id);
+        }
         RelayCommand::SetStartupWatermark { ts } => {
             state.startup_watermark = Some(ts);
             if state.membership_last_seen.is_none() {
@@ -1366,9 +1462,8 @@ fn retain_deferred_command_intent(
 
 /// Execute a command on a live WebSocket connection.
 ///
-/// Handles the five data commands: Subscribe, Unsubscribe,
-/// SubscribeMembership, PublishEvent, SetStartupWatermark. Callers handle
-/// Shutdown and Reconnect for control flow before dispatching here.
+/// Handles the data commands. Callers handle Shutdown and Reconnect for
+/// control flow before dispatching here.
 ///
 /// Returns `true` if the command succeeded (or was a no-op). Returns `false`
 /// if a WebSocket send failed — the caller should treat this as a dead socket
@@ -1496,6 +1591,15 @@ async fn execute_connected_command(
                 false
             }
         }
+        RelayCommand::SubscribeExactMyBuzzRecovery { event_id } => {
+            let sent = send_exact_mybuzz_recovery_subscribe(ws, &event_id).await;
+            state.mybuzz_recovery_intent = Some(event_id);
+            if !sent {
+                state.report_recovery_status(RecoveryRelayStatus::SendFailed);
+                warn!("exact MyBuzz recovery REQ failed — reporting to ledger owner");
+            }
+            sent
+        }
         RelayCommand::PublishEvent { event } => {
             // Observer telemetry frames (kind 24200) are durable telemetry, not
             // droppable ephemera: park them while the rate-limit gate is armed —
@@ -1567,6 +1671,7 @@ async fn run_background_task(
     initial_handshake_buffer: std::collections::VecDeque<RelayMessage>,
     event_tx: mpsc::Sender<Option<BuzzEvent>>,
     observer_control_tx: mpsc::Sender<Event>,
+    recovery_status_tx: mpsc::Sender<RecoveryRelayStatus>,
     mut cmd_rx: mpsc::Receiver<RelayCommand>,
     keys: Keys,
     relay_url: String,
@@ -1574,6 +1679,7 @@ async fn run_background_task(
     auth_tag: Option<nostr::Tag>,
 ) {
     let mut state = BgState::new();
+    state.recovery_status_tx = Some(recovery_status_tx);
 
     let handshake_ok = process_handshake_buffer(
         &mut ws,
@@ -1591,6 +1697,7 @@ async fn run_background_task(
         warn!("handshake buffer contained a drop signal — attempting autonomous reconnect");
         // Don't wait for a caller-driven Reconnect command — the caller was
         // never notified (no sentinel sent). Go straight to reconnect loop.
+        state.report_recovery_connection_loss();
         let _ = event_tx.try_send(None);
         match try_autonomous_reconnect(
             &mut ws,
@@ -1674,6 +1781,7 @@ async fn run_background_task(
                 ResubscribeResult::Shutdown => return,
                 ResubscribeResult::RetryConnection => {
                     warn!("proactive resubscribe had failures — triggering reconnect");
+                    state.report_recovery_connection_loss();
                     let _ = event_tx.try_send(None);
                     match try_autonomous_reconnect(
                         &mut ws,
@@ -1850,7 +1958,8 @@ async fn run_background_task(
                            // Signal the caller, then attempt autonomous reconnect.
                            // Use try_send to avoid blocking on backpressure — recovery
                            // must not stall when the event channel is full.
-                           let _ = event_tx.try_send(None);
+                           state.report_recovery_connection_loss();
+        let _ = event_tx.try_send(None);
                            let outcome = try_autonomous_reconnect(
                                &mut ws,
                                &mut cmd_rx,
@@ -1931,7 +2040,8 @@ async fn run_background_task(
                                if !ok {
                                    // Send failed — socket is likely dead. Trigger reconnect.
                                    warn!("command send failed — triggering reconnect");
-                                   let _ = event_tx.try_send(None);
+                                   state.report_recovery_connection_loss();
+        let _ = event_tx.try_send(None);
                                    match try_autonomous_reconnect(
                                        &mut ws, &mut cmd_rx, &mut state, &keys, &relay_url,
         &agent_pubkey_hex, &event_tx,
@@ -1970,7 +2080,8 @@ async fn run_background_task(
                            // No pong received after our last ping — connection is dead.
                            warn!("no pong received within {:?} — connection dead, reconnecting", PONG_TIMEOUT);
                            // Use try_send to avoid blocking on backpressure during recovery.
-                           let _ = event_tx.try_send(None);
+                           state.report_recovery_connection_loss();
+        let _ = event_tx.try_send(None);
                            match try_autonomous_reconnect(
                                &mut ws, &mut cmd_rx, &mut state, &keys, &relay_url,
         &agent_pubkey_hex, &event_tx,
@@ -2003,7 +2114,8 @@ async fn run_background_task(
                            if let Err(e) = ws_send_timeout(&mut ws, Message::Ping(vec![].into()), WS_SEND_TIMEOUT_SECS).await {
                                warn!("failed to send ping: {e} — triggering reconnect");
                                // Use try_send to avoid blocking on backpressure during recovery.
-                               let _ = event_tx.try_send(None);
+                               state.report_recovery_connection_loss();
+        let _ = event_tx.try_send(None);
                                match try_autonomous_reconnect(
                                    &mut ws, &mut cmd_rx, &mut state, &keys, &relay_url,
         &agent_pubkey_hex, &event_tx,
@@ -2097,7 +2209,37 @@ async fn handle_ws_message(
                     subscription_id,
                     event,
                 } => {
-                    if subscription_id == OBSERVER_CONTROL_SUB_ID {
+                    if subscription_id == MYBUZZ_RECOVERY_SUB_ID {
+                        match route_exact_mybuzz_recovery_event(
+                            state.mybuzz_recovery_intent.as_deref(),
+                            *event,
+                        ) {
+                            Ok(buzz_event) => match event_tx.try_send(Some(buzz_event)) {
+                                Ok(()) => {
+                                    debug!("exact MyBuzz recovery event forwarded");
+                                }
+                                Err(error) => {
+                                    if let Some(status) = recovery_event_backpressure_status(&error)
+                                    {
+                                        state.report_recovery_status(status);
+                                        warn!(
+                                            ?status,
+                                            "exact MyBuzz recovery event dropped because event channel is full"
+                                        );
+                                    } else {
+                                        return false;
+                                    }
+                                }
+                            },
+                            Err(status) => {
+                                state.report_recovery_status(status);
+                                warn!(
+                                    ?status,
+                                    "exact MyBuzz recovery event rejected without changing relay state"
+                                );
+                            }
+                        }
+                    } else if subscription_id == OBSERVER_CONTROL_SUB_ID {
                         match observer_control_tx.try_send(*event) {
                             Ok(()) => {}
                             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -2130,10 +2272,7 @@ async fn handle_ws_message(
                             return true;
                         }
                         let ts = event.created_at.as_secs();
-                        let buzz_event = BuzzEvent {
-                            channel_id: channel_uuid,
-                            event: *event,
-                        };
+                        let buzz_event = normal_buzz_event(channel_uuid, *event);
                         let cap = event_tx.max_capacity();
                         let used = cap - event_tx.capacity();
                         if used >= (cap * 4 / 5) {
@@ -2171,10 +2310,7 @@ async fn handle_ws_message(
                         let ts = event.created_at.as_secs();
                         let event_id_hex = event.id.to_hex();
                         if state.record_event(channel_id, &event) {
-                            let buzz_event = BuzzEvent {
-                                channel_id,
-                                event: *event,
-                            };
+                            let buzz_event = normal_buzz_event(channel_id, *event);
                             // Warn at 80% capacity.
                             let cap = event_tx.max_capacity();
                             let used = cap - event_tx.capacity();
@@ -2219,7 +2355,15 @@ async fn handle_ws_message(
                     }
                 }
                 RelayMessage::Eose { subscription_id } => {
-                    debug!("EOSE for subscription {subscription_id}");
+                    if let Some(status) = classify_mybuzz_recovery_terminal(
+                        &subscription_id,
+                        RecoveryTerminalFrame::Eose,
+                    ) {
+                        state.report_recovery_status(status);
+                        debug!(?status, "exact MyBuzz recovery subscription reached EOSE");
+                    } else {
+                        debug!("EOSE for subscription {subscription_id}");
+                    }
                 }
                 RelayMessage::Notice { message } => {
                     // Fix 4: NOTICE at warn level.
@@ -2242,6 +2386,18 @@ async fn handle_ws_message(
                     subscription_id,
                     message,
                 } => {
+                    if let Some(status) = classify_mybuzz_recovery_terminal(
+                        &subscription_id,
+                        RecoveryTerminalFrame::Closed,
+                    ) {
+                        state.report_recovery_status(status);
+                        warn!(
+                            ?status,
+                            "exact MyBuzz recovery subscription closed by relay: {message}"
+                        );
+                        return true;
+                    }
+
                     // A per-channel membership denial means THIS channel is
                     // forbidden, not the whole connection. Drop just this
                     // channel's subscription and keep the socket — otherwise the
@@ -3181,8 +3337,8 @@ async fn wait_for_reconnect(
 
 /// Send a NIP-01 REQ for a channel, built from a [`ChannelFilter`].
 ///
-/// - `kinds` is included only when `filter.kinds` is `Some`; `None` = wildcard.
-/// - `#p` is included only when `filter.require_mention` is `true`.
+/// - `kinds` is included only when a wire filter has `Some`; `None` = wildcard.
+/// - `#p` is included only when a wire filter requires it.
 /// - `#h` is always included (channel-scoped subscription).
 /// - On first subscribe (`since` is `None`) adds `since=now` to avoid replaying
 ///   history. On reconnect (`since` is `Some`) subtracts [`SINCE_SKEW_SECS`].
@@ -3197,20 +3353,9 @@ async fn send_subscribe(
     filter: &ChannelFilter,
 ) -> bool {
     let sub_id = channel_sub_id(channel_id);
-
-    let mut req_filter = serde_json::Map::new();
-
-    // kinds — omit entirely for wildcard subscriptions.
-    if let Some(ref kinds) = filter.kinds {
-        req_filter.insert("kinds".into(), json!(kinds));
-    }
-
-    // #h — always present (channel scope).
-    req_filter.insert("#h".into(), json!([channel_id.to_string()]));
-
-    // #p — only when require_mention is true.
-    if filter.require_mention {
-        req_filter.insert("#p".into(), json!([agent_pubkey_hex]));
+    if filter.wire_filters.is_empty() {
+        warn!("refusing to send empty REQ filter set for channel {channel_id}");
+        return false;
     }
 
     // since — on first subscribe use current time to skip history; on reconnect
@@ -3222,9 +3367,26 @@ async fn send_subscribe(
             .unwrap_or_default()
             .as_secs(),
     };
-    req_filter.insert("since".into(), json!(since_ts));
+    let mut req = vec![json!("REQ"), json!(sub_id)];
+    for filter in &filter.wire_filters {
+        let mut req_filter = serde_json::Map::new();
 
-    let req = json!(["REQ", sub_id, Value::Object(req_filter)]);
+        // kinds — omit entirely for wildcard subscriptions.
+        if let Some(kinds) = &filter.kinds {
+            req_filter.insert("kinds".into(), json!(kinds));
+        }
+
+        // #h and since apply to every OR-ed filter object.
+        req_filter.insert("#h".into(), json!([channel_id.to_string()]));
+        req_filter.insert("since".into(), json!(since_ts));
+
+        // #p — only when this wire filter requires it.
+        if filter.require_mention {
+            req_filter.insert("#p".into(), json!([agent_pubkey_hex]));
+        }
+        req.push(Value::Object(req_filter));
+    }
+    let req = Value::Array(req);
 
     match serde_json::to_string(&req) {
         Ok(text) => {
@@ -3248,6 +3410,46 @@ async fn send_subscribe(
         }
         Err(e) => {
             warn!("failed to serialize REQ for channel {channel_id}: {e}");
+            false
+        }
+    }
+}
+
+/// Build the sole cursor-free MyBuzz recovery REQ frame from the recovery foundation.
+fn exact_mybuzz_recovery_subscription_frame(event_id: &str) -> Result<Value, RelayError> {
+    let frame =
+        recovery_subscription_frame(event_id).map_err(|_| RelayError::InvalidRecoveryEventId)?;
+    debug_assert_eq!(
+        frame.get(1).and_then(Value::as_str),
+        Some(MYBUZZ_RECOVERY_SUB_ID)
+    );
+    Ok(frame)
+}
+
+/// Send the exact-ID MyBuzz recovery REQ without channel filters or cursors.
+async fn send_exact_mybuzz_recovery_subscribe(ws: &mut WsStream, event_id: &str) -> bool {
+    let req = match exact_mybuzz_recovery_subscription_frame(event_id) {
+        Ok(frame) => frame,
+        Err(error) => {
+            warn!("refusing invalid exact MyBuzz recovery REQ: {error}");
+            return false;
+        }
+    };
+    match serde_json::to_string(&req) {
+        Ok(text) => {
+            match ws_send_timeout(ws, Message::Text(text.into()), WS_SEND_TIMEOUT_SECS).await {
+                Ok(()) => {
+                    debug!("subscribed to exact MyBuzz recovery event");
+                    true
+                }
+                Err(error) => {
+                    warn!("failed to send exact MyBuzz recovery REQ: {error}");
+                    false
+                }
+            }
+        }
+        Err(error) => {
+            warn!("failed to serialize exact MyBuzz recovery REQ: {error}");
             false
         }
     }
@@ -3454,6 +3656,81 @@ fn extract_h_tag_uuid(event: &nostr::Event) -> Option<Uuid> {
         } else {
             None
         }
+    })
+}
+
+/// Build a normal subscription event without exact-ID recovery provenance.
+fn normal_buzz_event(channel_id: Uuid, event: Event) -> BuzzEvent {
+    BuzzEvent {
+        channel_id,
+        event,
+        recovery_event_id: None,
+    }
+}
+
+/// Validate and route the single-event MyBuzz recovery response.
+///
+/// Recovery events are isolated from normal subscriptions: matching them does
+/// not update deduplication, replay cursors, or channel backpressure state.
+fn route_exact_mybuzz_recovery_event(
+    recovery_intent: Option<&str>,
+    event: Event,
+) -> Result<BuzzEvent, RecoveryRelayStatus> {
+    let recovery_event_id = event.id.to_hex();
+    if recovery_intent != Some(recovery_event_id.as_str()) {
+        return Err(RecoveryRelayStatus::WrongEventId);
+    }
+
+    let channel_id = event.tags.iter().find_map(|tag| {
+        let tag_vec = tag.as_slice();
+        if tag_vec.len() >= 2
+            && tag_vec[0] == "h"
+            && tag_vec[1] == crate::mybuzz_handoff::MYBUZZ_CHANNEL
+        {
+            tag_vec[1].parse::<Uuid>().ok()
+        } else {
+            None
+        }
+    });
+    let Some(channel_id) = channel_id else {
+        return Err(RecoveryRelayStatus::WrongChannel);
+    };
+
+    Ok(BuzzEvent {
+        channel_id,
+        event,
+        recovery_event_id: Some(recovery_event_id),
+    })
+}
+
+/// Classify a recovery event-channel send failure without triggering replay.
+fn recovery_event_backpressure_status<T>(
+    error: &mpsc::error::TrySendError<T>,
+) -> Option<RecoveryRelayStatus> {
+    match error {
+        mpsc::error::TrySendError::Full(_) => Some(RecoveryRelayStatus::Backpressured),
+        mpsc::error::TrySendError::Closed(_) => None,
+    }
+}
+
+/// Recovery terminal frames are isolated from generic subscription recovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryTerminalFrame {
+    Eose,
+    Closed,
+}
+
+/// Classify an EOSE or CLOSED belonging to the exact-ID recovery subscription.
+fn classify_mybuzz_recovery_terminal(
+    subscription_id: &str,
+    frame: RecoveryTerminalFrame,
+) -> Option<RecoveryRelayStatus> {
+    if subscription_id != MYBUZZ_RECOVERY_SUB_ID {
+        return None;
+    }
+    Some(match frame {
+        RecoveryTerminalFrame::Eose => RecoveryRelayStatus::Eose,
+        RecoveryTerminalFrame::Closed => RecoveryRelayStatus::Closed,
     })
 }
 
@@ -3687,7 +3964,10 @@ pub(crate) fn parse_relay_message(text: &str) -> Result<RelayMessage, RelayError
 /// - `NoAuthChallenge`, `ConnectionClosed`, `Timeout` — timing/link noise.
 fn is_terminal_connect_error(err: &RelayError) -> bool {
     match err {
-        RelayError::Http(_) | RelayError::Json(_) | RelayError::UnexpectedMessage(_) => true,
+        RelayError::Http(_)
+        | RelayError::Json(_)
+        | RelayError::UnexpectedMessage(_)
+        | RelayError::InvalidRecoveryEventId => true,
         RelayError::WebSocket(e) => is_terminal_ws_error(e.as_ref()),
         RelayError::AuthFailed(message) => is_terminal_auth_failure(message),
         RelayError::NoAuthChallenge | RelayError::ConnectionClosed | RelayError::Timeout => false,
@@ -4437,11 +4717,298 @@ mod tests {
             .expect("parse test websocket frame")
     }
 
+    fn test_harness_with_command_rx() -> (HarnessRelay, mpsc::Receiver<RelayCommand>) {
+        let (event_tx, event_rx) = mpsc::channel(1);
+        drop(event_tx);
+        let (observer_control_tx, observer_control_rx) = mpsc::channel(1);
+        drop(observer_control_tx);
+        let (recovery_status_tx, recovery_status_rx) = mpsc::channel(1);
+        drop(recovery_status_tx);
+        let (cmd_tx, cmd_rx) = mpsc::channel(1);
+        (
+            HarnessRelay {
+                event_rx,
+                observer_control_rx: Some(observer_control_rx),
+                recovery_status_rx: Some(recovery_status_rx),
+                cmd_tx,
+                http: reqwest::Client::new(),
+                relay_url: "ws://test.invalid".to_owned(),
+                keys: Keys::generate(),
+                auth_tag: None,
+                bg_handle: None,
+            },
+            cmd_rx,
+        )
+    }
+
+    #[tokio::test]
+    async fn recovery_status_is_forwarded_once_without_mutating_normal_channel_state() {
+        let (status_tx, mut status_rx) = mpsc::channel(1);
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        let ordinary_event = make_test_event(&Keys::generate(), 2_000);
+        assert!(state.record_event(channel_id, &ordinary_event));
+        let last_seen = state.last_seen.clone();
+
+        report_recovery_status(&status_tx, RecoveryRelayStatus::WrongEventId);
+
+        assert_eq!(
+            status_rx.recv().await,
+            Some(RecoveryRelayStatus::WrongEventId)
+        );
+        assert_eq!(state.last_seen, last_seen);
+        assert!(state.active_subscriptions.is_empty());
+        assert!(state.channel_dropped_since.is_empty());
+    }
+
+    #[test]
+    fn recovery_status_receiver_can_only_be_taken_once() {
+        let (mut relay, _cmd_rx) = test_harness_with_command_rx();
+
+        assert!(relay.take_recovery_status_rx().is_some());
+        assert!(relay.take_recovery_status_rx().is_none());
+    }
+
     fn test_channel_filter() -> ChannelFilter {
+        channel_filter(Some(vec![9]), false)
+    }
+
+    fn channel_filter(kinds: Option<Vec<u32>>, require_mention: bool) -> ChannelFilter {
         ChannelFilter {
-            kinds: Some(vec![9]),
-            require_mention: false,
+            wire_filters: vec![WireChannelFilter {
+                kinds,
+                require_mention,
+            }],
         }
+    }
+
+    #[test]
+    fn exact_mybuzz_recovery_subscription_frame_matches_foundation_contract() {
+        let event_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+        assert_eq!(
+            exact_mybuzz_recovery_subscription_frame(event_id).expect("valid recovery ID"),
+            json!([
+                "REQ",
+                "mybuzz-recovery-v1",
+                {
+                    "ids": [event_id],
+                    "kinds": [1],
+                    "#h": [crate::mybuzz_handoff::MYBUZZ_CHANNEL],
+                }
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_exact_mybuzz_recovery_id_is_rejected_without_queuing_a_command() {
+        let (relay, mut cmd_rx) = test_harness_with_command_rx();
+
+        let result = relay
+            .subscribe_exact_mybuzz_recovery("not-a-valid-event-id".to_owned())
+            .await;
+
+        assert!(matches!(result, Err(RelayError::InvalidRecoveryEventId)));
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn exact_mybuzz_recovery_intent_does_not_touch_channel_state() {
+        let event_id =
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned();
+        let mut state = BgState::new();
+
+        apply_command_to_state(
+            &mut state,
+            RelayCommand::SubscribeExactMyBuzzRecovery {
+                event_id: event_id.clone(),
+            },
+        );
+
+        assert_eq!(state.mybuzz_recovery_intent, Some(event_id));
+        assert!(state.active_subscriptions.is_empty());
+        assert!(state.active_filters.is_empty());
+        assert!(state.last_seen.is_empty());
+        assert!(state.subscribe_since.is_empty());
+        assert!(state.channel_dropped_since.is_empty());
+        assert!(state.rate_limited_pending.is_empty());
+    }
+
+    #[test]
+    fn exact_mybuzz_recovery_event_routes_with_provenance() {
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::TextNote, "recovery")
+            .tags([Tag::parse(["h", crate::mybuzz_handoff::MYBUZZ_CHANNEL])
+                .expect("valid MyBuzz h tag")])
+            .custom_created_at(nostr::Timestamp::from(1_000))
+            .sign_with_keys(&keys)
+            .expect("sign recovery event");
+        let event_id = event.id.to_hex();
+
+        let routed = route_exact_mybuzz_recovery_event(Some(&event_id), event.clone())
+            .expect("matching recovery event routes");
+
+        assert_eq!(
+            routed.channel_id.to_string(),
+            crate::mybuzz_handoff::MYBUZZ_CHANNEL
+        );
+        assert_eq!(routed.event.id, event.id);
+        assert_eq!(routed.recovery_event_id.as_deref(), Some(event_id.as_str()));
+    }
+
+    #[test]
+    fn exact_mybuzz_recovery_event_rejects_wrong_id_without_state_contamination() {
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::TextNote, "wrong id")
+            .tags([Tag::parse(["h", crate::mybuzz_handoff::MYBUZZ_CHANNEL])
+                .expect("valid MyBuzz h tag")])
+            .sign_with_keys(&keys)
+            .expect("sign recovery event");
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        let ordinary_event = make_test_event(&Keys::generate(), 2_000);
+        let ordinary_id = ordinary_event.id.to_hex();
+        assert!(state.record_event(channel_id, &ordinary_event));
+        let last_seen = state.last_seen.clone();
+
+        assert!(matches!(
+            route_exact_mybuzz_recovery_event(Some("different-id"), event),
+            Err(RecoveryRelayStatus::WrongEventId)
+        ));
+        assert_eq!(state.last_seen, last_seen);
+        assert!(state.seen_ids.contains(&ordinary_id));
+        assert!(state.channel_dropped_since.is_empty());
+    }
+
+    #[test]
+    fn exact_mybuzz_recovery_event_rejects_wrong_h_without_state_contamination() {
+        let keys = Keys::generate();
+        let wrong_channel = Uuid::new_v4().to_string();
+        let event = EventBuilder::new(Kind::TextNote, "wrong channel")
+            .tags([Tag::parse(["h", wrong_channel.as_str()]).expect("valid h tag")])
+            .sign_with_keys(&keys)
+            .expect("sign recovery event");
+        let event_id = event.id.to_hex();
+        let state = BgState::new();
+
+        assert!(matches!(
+            route_exact_mybuzz_recovery_event(Some(&event_id), event),
+            Err(RecoveryRelayStatus::WrongChannel)
+        ));
+        assert!(state.last_seen.is_empty());
+        assert!(!state.seen_ids.contains(&event_id));
+        assert!(state.channel_dropped_since.is_empty());
+    }
+
+    #[test]
+    fn normal_subscription_event_has_no_recovery_provenance() {
+        let event = make_test_event(&Keys::generate(), 1_000);
+
+        let routed = normal_buzz_event(Uuid::new_v4(), event);
+
+        assert_eq!(routed.recovery_event_id, None);
+    }
+
+    #[test]
+    fn exact_mybuzz_recovery_backpressure_is_observable_without_state_contamination() {
+        let (tx, _rx) = mpsc::channel::<()>(1);
+        tx.try_send(()).expect("fill event channel");
+        let error = tx.try_send(()).expect_err("event channel is full");
+        let state = BgState::new();
+
+        assert_eq!(
+            recovery_event_backpressure_status(&error),
+            Some(RecoveryRelayStatus::Backpressured)
+        );
+        assert!(state.last_seen.is_empty());
+        assert!(!state.seen_ids.contains("recovery-event-id"));
+        assert!(state.channel_dropped_since.is_empty());
+        assert!(!state.proactive_resubscribe_needed);
+    }
+
+    #[test]
+    fn exact_mybuzz_recovery_terminal_classification_is_isolated() {
+        assert_eq!(
+            classify_mybuzz_recovery_terminal(MYBUZZ_RECOVERY_SUB_ID, RecoveryTerminalFrame::Eose,),
+            Some(RecoveryRelayStatus::Eose)
+        );
+        assert_eq!(
+            classify_mybuzz_recovery_terminal(
+                MYBUZZ_RECOVERY_SUB_ID,
+                RecoveryTerminalFrame::Closed,
+            ),
+            Some(RecoveryRelayStatus::Closed)
+        );
+        assert_eq!(
+            classify_mybuzz_recovery_terminal("ordinary-subscription", RecoveryTerminalFrame::Eose),
+            None
+        );
+        assert_eq!(
+            classify_mybuzz_recovery_terminal(
+                "ordinary-subscription",
+                RecoveryTerminalFrame::Closed
+            ),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn send_subscribe_serializes_one_multi_filter_req_for_mybuzz_kind_one() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let channel_id = Uuid::parse_str("70114f25-3b91-46f5-bea8-7125dbb18336").unwrap();
+        let agent_pubkey = "ea7615e8756cee7ca1cd9176271145c475abdd6e8139d578a9a7f5320dc919b4";
+        let filter = ChannelFilter {
+            wire_filters: vec![
+                WireChannelFilter {
+                    kinds: Some(vec![9, 46010, 40007]),
+                    require_mention: true,
+                },
+                WireChannelFilter {
+                    kinds: Some(vec![1]),
+                    require_mention: false,
+                },
+            ],
+        };
+
+        assert!(
+            send_subscribe(
+                &mut client,
+                &BgState::new(),
+                channel_id,
+                agent_pubkey,
+                Some(128),
+                &filter,
+            )
+            .await
+        );
+
+        assert_eq!(
+            next_test_frame(&mut server).await,
+            json!([
+                "REQ",
+                channel_sub_id(channel_id),
+                {
+                    "kinds": [9, 46010, 40007],
+                    "#h": [channel_id.to_string()],
+                    "#p": [agent_pubkey],
+                    "since": 123,
+                },
+                {
+                    "kinds": [1],
+                    "#h": [channel_id.to_string()],
+                    "since": 123,
+                },
+            ])
+        );
+        assert!(
+            timeout(Duration::from_millis(50), server.next())
+                .await
+                .is_err(),
+            "one channel subscription must not send a second REQ"
+        );
     }
 
     fn seed_test_subscription(state: &mut BgState, channel_id: Uuid) {
@@ -4908,10 +5475,7 @@ mod tests {
         state.startup_watermark = Some(2_000);
         let channel_id = Uuid::new_v4();
         let membership_ts = 10_000;
-        let filter = ChannelFilter {
-            kinds: Some(vec![9]),
-            require_mention: true,
-        };
+        let filter = channel_filter(Some(vec![9]), true);
 
         apply_command_to_state(
             &mut state,
@@ -4999,10 +5563,7 @@ mod tests {
             state,
             RelayCommand::Subscribe {
                 channel_id,
-                filter: ChannelFilter {
-                    kinds: Some(vec![9]),
-                    require_mention: false,
-                },
+                filter: channel_filter(Some(vec![9]), false),
                 replay_since: Some(1_000),
             },
         );
@@ -6113,10 +6674,7 @@ mod tests {
             &mut state,
             RelayCommand::Subscribe {
                 channel_id,
-                filter: ChannelFilter {
-                    kinds: Some(vec![9]),
-                    require_mention: false,
-                },
+                filter: channel_filter(Some(vec![9]), false),
                 replay_since: Some(1_000),
             },
         );
@@ -6204,10 +6762,7 @@ mod tests {
             &mut state,
             RelayCommand::Subscribe {
                 channel_id,
-                filter: ChannelFilter {
-                    kinds: Some(vec![9]),
-                    require_mention: false,
-                },
+                filter: channel_filter(Some(vec![9]), false),
                 replay_since: None,
             },
         );
@@ -6243,10 +6798,7 @@ mod tests {
             &mut state,
             RelayCommand::Subscribe {
                 channel_id,
-                filter: ChannelFilter {
-                    kinds: Some(vec![9]),
-                    require_mention: false,
-                },
+                filter: channel_filter(Some(vec![9]), false),
                 replay_since: None,
             },
         );
@@ -6278,10 +6830,7 @@ mod tests {
             &mut state,
             RelayCommand::Subscribe {
                 channel_id,
-                filter: ChannelFilter {
-                    kinds: Some(vec![9]),
-                    require_mention: false,
-                },
+                filter: channel_filter(Some(vec![9]), false),
                 replay_since: None,
             },
         );

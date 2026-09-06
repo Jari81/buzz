@@ -549,6 +549,7 @@ fn mentions_rule(kinds: Vec<u32>) -> filter::SubscriptionRule {
         channels: filter::ChannelScope::All("all".into()),
         kinds,
         require_mention: true,
+        relay_require_mention: None,
         filter: None,
         compiled_filter: None,
         consecutive_timeouts: Arc::new(AtomicU32::new(0)),
