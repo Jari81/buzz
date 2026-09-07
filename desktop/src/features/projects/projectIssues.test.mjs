@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -10,6 +11,7 @@ import {
   ISSUE_ACTION_REQUIRED_LABEL,
   ISSUE_ASSIGNMENT_LABEL,
   ISSUE_UNASSIGNMENT_LABEL,
+  myBuzzLifecycleSignalsForIssue,
   nextProjectIssueCommentCreatedAt,
   nextProjectIssueStatusCreatedAt,
   PROJECT_ISSUE_STATUS,
@@ -24,6 +26,207 @@ const REVIEW_TESTER = "f".repeat(64);
 const REVIEW_COORDINATOR = "1".repeat(64);
 const REVIEW_ID = "9".repeat(64);
 const REPO_ADDRESS = `30617:${OWNER}:demo`;
+
+const lifecycleFixture = JSON.parse(
+  await readFile(
+    new URL("./fixtures/mybuzz-lifecycle-signals-v1.json", import.meta.url),
+    "utf8",
+  ),
+);
+
+function lifecycleEvent({
+  id,
+  pubkey = OWNER,
+  createdAt,
+  tags,
+}) {
+  return { id, kind: 1, pubkey, created_at: createdAt, content: "", tags };
+}
+
+function lifecycleAssignment(id, writer, createdAt, extraTags = []) {
+  return lifecycleEvent({
+    id,
+    createdAt,
+    tags: [
+      ["e", "e".repeat(64), "", "root"],
+      ["a", REPO_ADDRESS],
+      ["t", "assignment"],
+      ["p", writer],
+      ...extraTags,
+    ],
+  });
+}
+
+function lifecycleProgress(id, writer, assignment, createdAt, phase = "working", extraTags = []) {
+  return lifecycleEvent({
+    id,
+    pubkey: writer,
+    createdAt,
+    tags: [
+      ["e", "e".repeat(64), "", "root"],
+      ["a", REPO_ADDRESS],
+      ["t", "mybuzz-writer-progress"],
+      ["writer", writer],
+      ["assignment", assignment],
+      ["session", "session-1"],
+      ["phase", phase],
+      ...(phase === "working" ? [] : [["reason", "Waiting for input."]]),
+      ...extraTags,
+    ],
+  });
+}
+
+test("reduces strict MyBuzz lifecycle assignment generations and progress", () => {
+  const writer = "d".repeat(64);
+  const first = "1".repeat(64);
+  const second = "2".repeat(64);
+  const unassign = lifecycleEvent({
+    id: "3".repeat(64),
+    createdAt: 200,
+    tags: [
+      ["e", "e".repeat(64), "", "root"],
+      ["a", REPO_ADDRESS],
+      ["t", "unassignment"],
+      ["p", writer],
+      ["assignment", first],
+    ],
+  });
+  const signals = myBuzzLifecycleSignalsForIssue(
+    issueEvent(),
+    [
+      lifecycleAssignment(first, writer, 100),
+      lifecycleProgress("4".repeat(64), writer, first, 150),
+      unassign,
+      lifecycleAssignment(second, writer, 300),
+      lifecycleProgress("5".repeat(64), writer, first, 350),
+      lifecycleProgress("6".repeat(64), writer, second, 400),
+    ],
+    500,
+  );
+
+  assert.deepEqual(signals.assignment, { id: second, writer });
+  assert.equal(signals.progress?.eventId, "6".repeat(64));
+  assert.equal(signals.projection, "In Development");
+});
+
+test("versioned lifecycle fixture provides complete valid and invalid corpus", () => {
+  assert.equal(lifecycleFixture.schema, 1);
+  assert.equal(lifecycleFixture.valid.length, 3);
+  for (const name of [
+    "forged-signer",
+    "late-unassign",
+    "active-generation-assignment",
+    "old-heartbeat-after-reassign",
+    "wrong-root",
+    "wrong-repo",
+    "duplicate-or-unknown-tag",
+    "conflicting-phase",
+  ]) {
+    assert.ok(lifecycleFixture.invalid[name], `missing fixture case: ${name}`);
+  }
+});
+
+test("versioned lifecycle fixture reduces valid signals and rejects every invalid case", () => {
+  const fixtureIssue = issueEvent({
+    id: lifecycleFixture.issue,
+    tags: [["a", lifecycleFixture.repo]],
+  });
+  const valid = myBuzzLifecycleSignalsForIssue(
+    fixtureIssue,
+    lifecycleFixture.valid,
+    lifecycleFixture.now,
+  );
+
+  assert.equal(valid.assignment, null);
+  assert.equal(valid.progress, null);
+  assert.equal(valid.projection, null);
+
+  for (const [name, event] of Object.entries(lifecycleFixture.invalid)) {
+    const events =
+      name === "old-heartbeat-after-reassign"
+        ? [
+            lifecycleFixture.valid[0],
+            lifecycleFixture.valid[2],
+            {
+              ...lifecycleFixture.valid[0],
+              id: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              created_at: 350,
+            },
+            event,
+          ]
+        : [lifecycleFixture.valid[0], event];
+    const signals = myBuzzLifecycleSignalsForIssue(
+      fixtureIssue,
+      events,
+      lifecycleFixture.now,
+    );
+    assert.deepEqual(signals.assignment, {
+      id:
+        name === "old-heartbeat-after-reassign"
+          ? "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          : lifecycleFixture.valid[0].id,
+      writer: lifecycleFixture.writer,
+    });
+    assert.equal(signals.progress, null);
+    assert.equal(signals.projection, "Assigned / awaiting work");
+  }
+});
+
+test("fails closed for forged and malformed MyBuzz lifecycle signals", () => {
+  const writer = "d".repeat(64);
+  const assignment = "1".repeat(64);
+  const signals = myBuzzLifecycleSignalsForIssue(
+    issueEvent(),
+    [
+      lifecycleAssignment(assignment, writer, 100),
+      lifecycleAssignment("2".repeat(64), writer, 110),
+      lifecycleEvent({
+        id: "3".repeat(64),
+        pubkey: ATTACKER,
+        createdAt: 120,
+        tags: lifecycleAssignment("4".repeat(64), writer, 120).tags,
+      }),
+      lifecycleProgress("5".repeat(64), writer, assignment, 130, "working", [
+        ["unknown", "tag"],
+      ]),
+      lifecycleProgress("6".repeat(64), writer, assignment, 140, "blocked", [
+        ["phase", "failed"],
+      ]),
+    ],
+    500,
+  );
+
+  assert.deepEqual(signals.assignment, { id: assignment, writer });
+  assert.equal(signals.progress, null);
+  assert.equal(signals.projection, "Assigned / awaiting work");
+});
+
+test("lifecycle parser rejects wrong roots and repos, and expires old working progress", () => {
+  const writer = "d".repeat(64);
+  const assignment = "1".repeat(64);
+  const wrongRoot = lifecycleAssignment(assignment, writer, 100, [
+    ["e", "f".repeat(64), "", "root"],
+  ]);
+  const wrongRepo = lifecycleAssignment("2".repeat(64), writer, 110, [
+    ["a", `30617:${OWNER}:wrong`],
+  ]);
+  const valid = lifecycleAssignment("3".repeat(64), writer, 120);
+  const oldProgress = lifecycleProgress(
+    "4".repeat(64),
+    writer,
+    valid.id,
+    130,
+  );
+  const signals = myBuzzLifecycleSignalsForIssue(
+    issueEvent(),
+    [wrongRoot, wrongRepo, valid, oldProgress],
+    1_331,
+  );
+
+  assert.deepEqual(signals.assignment, { id: valid.id, writer });
+  assert.equal(signals.progress?.eventId, oldProgress.id);
+  assert.equal(signals.projection, "Assigned / awaiting work");
+});
 
 function workflowStatusEvent({
   id = "a".repeat(64),

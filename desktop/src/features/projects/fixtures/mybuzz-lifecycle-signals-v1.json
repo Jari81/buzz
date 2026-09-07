@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "issue": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "repo": "30617:dd57c78422bccf568feb2a7ae5bcf4d7ebefc2c6c54bf56a26faeb9e0b08d36b:demo",
+  "owner": "dd57c78422bccf568feb2a7ae5bcf4d7ebefc2c6c54bf56a26faeb9e0b08d36b",
+  "writer": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "now": 1000,
+  "valid": [
+    {
+      "id": "1111111111111111111111111111111111111111111111111111111111111111",
+      "kind": 1,
+      "pubkey": "dd57c78422bccf568feb2a7ae5bcf4d7ebefc2c6c54bf56a26faeb9e0b08d36b",
+      "created_at": 100,
+      "content": "",
+      "tags": [["e", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "", "root"], ["a", "30617:dd57c78422bccf568feb2a7ae5bcf4d7ebefc2c6c54bf56a26faeb9e0b08d36b:demo"], ["t", "assignment"], ["p", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]]
+    },
+    {
+      "id": "2222222222222222222222222222222222222222222222222222222222222222",
+      "kind": 1,
+      "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "created_at": 200,
+      "content": "",
+      "tags": [["e", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "", "root"], ["a", "30617:dd57c78422bccf568feb2a7ae5bcf4d7ebefc2c6c54bf56a26faeb9e0b08d36b:demo"], ["t", "mybuzz-writer-progress"], ["writer", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"], ["assignment", "1111111111111111111111111111111111111111111111111111111111111111"], ["session", "fixture-session"], ["phase", "working"]]
+    },
+    {
+      "id": "3333333333333333333333333333333333333333333333333333333333333333",
+      "kind": 1,
+      "pubkey": "dd57c78422bccf568feb2a7ae5bcf4d7ebefc2c6c54bf56a26faeb9e0b08d36b",
+      "created_at": 300,
+      "content": "",
+      "tags": [["e", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "", "root"], ["a", "30617:dd57c78422bccf568feb2a7ae5bcf4d7ebefc2c6c54bf56a26faeb9e0b08d36b:demo"], ["t", "unassignment"], ["p", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"], ["assignment", "1111111111111111111111111111111111111111111111111111111111111111"]]
+    }
+  ],
+  "invalid": {
+    "forged-signer": {"id": "4444444444444444444444444444444444444444444444444444444444444444", "kind": 1, "pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "created_at": 400, "content": "", "tags": [["e", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "", "root"], ["a", "30617:dd57c78422bccf568feb2a7ae5bcf4d7ebefc2c6c54bf56a26faeb9e0b08d36b:demo"], ["t", "assignment"], ["p", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]]},
+    "late-unassign": {"id": "5555555555555555555555555555555555555555555555555555555555555555", "kind": 1, "pubkey": "dd57c78422bccf568feb2a7ae5bcf4d7ebefc2c6c54bf56a26faeb9e0b08d36b", "created_at": 400, "content": "", "tags": [["e", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "", "root"], ["a", "30617:dd57c78422bccf568feb2a7ae5bcf4d7ebefc2c6c54bf56a26faeb9e0b08d36b:demo"], ["t", "unassignment"], ["p", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"], ["assignment", "9999999999999999999999999999999999999999999999999999999999999999"]]},
+    "active-generation-assignment": {"id": "6666666666666666666666666666666666666666666666666666666666666666", "kind": 1, "pubkey": "dd57c78422bccf568feb2a7ae5bcf4d7ebefc2c6c54bf56a26faeb9e0b08d36b", "created_at": 400, "content": "", "tags": [["e", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "", "root"], ["a", "30617:dd57c78422bccf568feb2a7ae5bcf4d7ebefc2c6c54bf56a26faeb9e0b08d36b:demo"], ["t", "assignment"], ["p", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]]},
+    "old-heartbeat-after-reassign": {"id": "7777777777777777777777777777777777777777777777777777777777777777", "kind": 1, "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "created_at": 400, "content": "", "tags": [["e", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "", "root"], ["a", "30617:dd57c78422bccf568feb2a7ae5bcf4d7ebefc2c6c54bf56a26faeb9e0b08d36b:demo"], ["t", "mybuzz-writer-progress"], ["writer", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"], ["assignment", "1111111111111111111111111111111111111111111111111111111111111111"], ["session", "fixture-session"], ["phase", "working"]]},
+    "wrong-root": {"id": "8888888888888888888888888888888888888888888888888888888888888888", "kind": 1, "pubkey": "dd57c78422bccf568feb2a7ae5bcf4d7ebefc2c6c54bf56a26faeb9e0b08d36b", "created_at": 400, "content": "", "tags": [["e", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "", "root"], ["a", "30617:dd57c78422bccf568feb2a7ae5bcf4d7ebefc2c6c54bf56a26faeb9e0b08d36b:demo"], ["t", "assignment"], ["p", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]]},
+    "wrong-repo": {"id": "9999999999999999999999999999999999999999999999999999999999999999", "kind": 1, "pubkey": "dd57c78422bccf568feb2a7ae5bcf4d7ebefc2c6c54bf56a26faeb9e0b08d36b", "created_at": 400, "content": "", "tags": [["e", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "", "root"], ["a", "30617:dd57c78422bccf568feb2a7ae5bcf4d7ebefc2c6c54bf56a26faeb9e0b08d36b:wrong"], ["t", "assignment"], ["p", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]]},
+    "duplicate-or-unknown-tag": {"id": "abababababababababababababababababababababababababababababababab", "kind": 1, "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "created_at": 400, "content": "", "tags": [["e", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "", "root"], ["a", "30617:dd57c78422bccf568feb2a7ae5bcf4d7ebefc2c6c54bf56a26faeb9e0b08d36b:demo"], ["t", "mybuzz-writer-progress"], ["writer", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"], ["assignment", "1111111111111111111111111111111111111111111111111111111111111111"], ["session", "fixture-session"], ["phase", "working"], ["unknown", "tag"]]},
+    "conflicting-phase": {"id": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd", "kind": 1, "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "created_at": 400, "content": "", "tags": [["e", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "", "root"], ["a", "30617:dd57c78422bccf568feb2a7ae5bcf4d7ebefc2c6c54bf56a26faeb9e0b08d36b:demo"], ["t", "mybuzz-writer-progress"], ["writer", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"], ["assignment", "1111111111111111111111111111111111111111111111111111111111111111"], ["session", "fixture-session"], ["phase", "working"], ["phase", "failed"]]}
+  }
+}

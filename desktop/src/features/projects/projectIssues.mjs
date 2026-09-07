@@ -12,6 +12,14 @@ export const MYBUZZ_WORKFLOW_STATUS_LABEL = "mybuzz-workflow-status";
 export const MYBUZZ_WORKFLOW_STATUS_WORKFLOW = "mybuzz-status-v1";
 export const MYBUZZ_WORKFLOW_STATUS_OWNER =
   "dd57c78422bccf568feb2a7ae5bcf4d7ebefc2c6c54bf56a26faeb9e0b08d36b";
+export const MYBUZZ_LIFECYCLE_PROGRESS_LABEL = "mybuzz-writer-progress";
+export const MYBUZZ_LIFECYCLE_PROGRESS_PHASES = [
+  "working",
+  "blocked",
+  "rate-limited",
+  "failed",
+];
+export const MYBUZZ_LIFECYCLE_PROGRESS_FRESH_SECONDS = 20 * 60;
 
 export const MYBUZZ_WORKFLOW_STATUS_STATES = [
   "triage",
@@ -174,6 +182,146 @@ function assignmentStateForIssue(issue, issueCommentEvents) {
   };
 }
 
+function exactLifecycleTags(event, expectedTags) {
+  if (!Array.isArray(event.tags) || event.tags.length !== expectedTags.length) {
+    return false;
+  }
+  return expectedTags.every((expectedTag) =>
+    event.tags.some(
+      (tag) =>
+        tag.length === expectedTag.length &&
+        tag.every((part, index) => part === expectedTag[index]),
+    ),
+  );
+}
+
+function isLowercaseHex64(value) {
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+}
+
+function lifecycleAssignmentOperation(event, issueId, repoAddress) {
+  if (
+    event.kind !== 1 ||
+    event.pubkey !== MYBUZZ_WORKFLOW_STATUS_OWNER ||
+    !isLowercaseHex64(event.id) ||
+    !Number.isInteger(event.created_at)
+  ) {
+    return null;
+  }
+  const assignment = event.tags.find((tag) => tag[0] === "p")?.[1];
+  if (!isLowercaseHex64(assignment)) return null;
+  if (
+    exactLifecycleTags(event, [
+      ["e", issueId, "", "root"],
+      ["a", repoAddress],
+      ["t", ISSUE_ASSIGNMENT_LABEL],
+      ["p", assignment],
+    ])
+  ) {
+    return { writer: assignment, type: "assignment" };
+  }
+  const generation = event.tags.find((tag) => tag[0] === "assignment")?.[1];
+  if (
+    !isLowercaseHex64(generation) ||
+    !exactLifecycleTags(event, [
+      ["e", issueId, "", "root"],
+      ["a", repoAddress],
+      ["t", ISSUE_UNASSIGNMENT_LABEL],
+      ["p", assignment],
+      ["assignment", generation],
+    ])
+  ) {
+    return null;
+  }
+  return { writer: assignment, generation, type: "unassignment" };
+}
+
+function lifecycleProgress(event, issueId, repoAddress, assignment) {
+  if (
+    event.kind !== 1 ||
+    event.pubkey !== assignment.writer ||
+    !isLowercaseHex64(event.id) ||
+    !Number.isInteger(event.created_at)
+  ) {
+    return null;
+  }
+  const phase = event.tags.find((tag) => tag[0] === "phase")?.[1];
+  const session = event.tags.find((tag) => tag[0] === "session")?.[1];
+  const reason = event.tags.find((tag) => tag[0] === "reason")?.[1];
+  if (
+    !MYBUZZ_LIFECYCLE_PROGRESS_PHASES.includes(phase) ||
+    typeof session !== "string" ||
+    session.length === 0 ||
+    !exactLifecycleTags(event, [
+      ["e", issueId, "", "root"],
+      ["a", repoAddress],
+      ["t", MYBUZZ_LIFECYCLE_PROGRESS_LABEL],
+      ["writer", assignment.writer],
+      ["assignment", assignment.id],
+      ["session", session],
+      ["phase", phase],
+      ...(phase === "working" ? [] : [["reason", reason]]),
+    ]) ||
+    (phase === "working"
+      ? reason !== undefined
+      : !isPrintableReason(reason))
+  ) {
+    return null;
+  }
+  return { event, phase, reason: reason ?? null, session };
+}
+
+export function myBuzzLifecycleSignalsForIssue(
+  issue,
+  issueCommentEvents,
+  now = Math.floor(Date.now() / 1_000),
+) {
+  const repoAddress = getTag(issue, "a");
+  if (!repoAddress) return { assignment: null, progress: null, projection: null };
+  let assignment = null;
+  for (const event of [...issueCommentEvents].sort(
+    (left, right) =>
+      left.created_at - right.created_at || left.id.localeCompare(right.id),
+  )) {
+    const operation = lifecycleAssignmentOperation(event, issue.id, repoAddress);
+    if (!operation) continue;
+    if (operation.type === "assignment") {
+      if (!assignment) assignment = { id: event.id, writer: operation.writer };
+    } else if (
+      assignment &&
+      assignment.id === operation.generation &&
+      assignment.writer === operation.writer
+    ) {
+      assignment = null;
+    }
+  }
+  if (!assignment) return { assignment: null, progress: null, projection: null };
+  const progress = issueCommentEvents
+    .map((event) => lifecycleProgress(event, issue.id, repoAddress, assignment))
+    .filter(Boolean)
+    .sort(
+      (left, right) =>
+        right.event.created_at - left.event.created_at ||
+        right.event.id.localeCompare(left.event.id),
+    )[0];
+  const freshWorking =
+    progress?.phase === "working" &&
+    now - progress.event.created_at <= MYBUZZ_LIFECYCLE_PROGRESS_FRESH_SECONDS;
+  return {
+    assignment,
+    progress: progress
+      ? {
+          createdAt: progress.event.created_at,
+          eventId: progress.event.id,
+          phase: progress.phase,
+          reason: progress.reason,
+          session: progress.session,
+        }
+      : null,
+    projection: freshWorking ? "In Development" : "Assigned / awaiting work",
+  };
+}
+
 function commentsForIssue(issueCommentEvents) {
   return sortEvents(issueCommentEvents)
     .filter((event) => !isWorkflowActivityEvent(event))
@@ -203,10 +351,6 @@ function isWorkflowActivityEvent(event) {
     labels.includes("human-verdict") ||
     labels.includes("issue-verdict-confirmed")
   );
-}
-
-function isLowercaseHex64(value) {
-  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 }
 
 function isPrintableReason(value) {
@@ -652,6 +796,10 @@ export function eventToProjectIssue(
     ),
   );
   const assignmentState = assignmentStateForIssue(issue, issueCommentEvents);
+  const lifecycleSignals = myBuzzLifecycleSignalsForIssue(
+    issue,
+    issueCommentEvents,
+  );
   const currentReviewBinding = currentReviewForIssue(
     issue,
     issueCommentEvents,
@@ -713,6 +861,7 @@ export function eventToProjectIssue(
     recipients: getAllTags(issue, "p"),
     assignees: assignmentState.assignees,
     assigneeOperationHeads: assignmentState.heads,
+    lifecycleSignals,
     status,
     workflowStatus: workflowStatus
       ? {
