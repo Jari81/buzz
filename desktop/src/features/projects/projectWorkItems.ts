@@ -4,6 +4,7 @@ import {
   fetchAssignmentOperationEvents,
   mergeEventsById,
 } from "./assignmentOperationFetch";
+import { enumerateProjectEvents } from "./projectEnumeration";
 import {
   KIND_GIT_ISSUE,
   KIND_GIT_PR_UPDATE,
@@ -75,6 +76,20 @@ function groupByRepoAddress(events: RelayEvent[]): Map<string, RelayEvent[]> {
 }
 
 type FetchEventsInput = Parameters<(typeof relayClient)["fetchEvents"]>[0];
+const PROJECT_COMMENT_PAGE_SIZE = 500;
+
+function fetchIssueCommentsExhaustively(
+  issueIds: string[],
+  fetchEvents: (filter: FetchEventsInput) => Promise<RelayEvent[]>,
+): Promise<RelayEvent[]> {
+  if (issueIds.length === 0) return Promise.resolve([]);
+  return enumerateProjectEvents(
+    fetchEvents,
+    [KIND_TEXT_NOTE],
+    PROJECT_COMMENT_PAGE_SIZE,
+    { "#e": issueIds },
+  );
+}
 
 /** Loads aggregate issue and pull-request data with bounded relay fan-out. */
 export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
@@ -95,6 +110,14 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
     "#a": repoAddresses,
     limit: 2_000,
   });
+  const issueCommentPromise = rootPromise.then((rootEvents) =>
+    fetchIssueCommentsExhaustively(
+      rootEvents
+        .filter((event) => event.kind === KIND_GIT_ISSUE)
+        .map((event) => event.id),
+      fetchEvents,
+    ),
+  );
   const [rootResult, updateResult, commentResult, statusResult, assignResult] =
     await Promise.allSettled([
       rootPromise,
@@ -103,11 +126,7 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
         "#a": repoAddresses,
         limit: 2_000,
       }),
-      fetchEvents({
-        kinds: [KIND_TEXT_NOTE],
-        "#a": repoAddresses,
-        limit: 2_000,
-      }),
+      issueCommentPromise,
       fetchEvents({
         kinds: [KIND_GIT_STATUS_OPEN, KIND_GIT_STATUS_MERGED],
         "#a": repoAddresses,

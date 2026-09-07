@@ -15,6 +15,7 @@ import {
   nextProjectIssueCommentCreatedAt,
   nextProjectIssueStatusCreatedAt,
   PROJECT_ISSUE_STATUS,
+  projectIssueEventsToIssues,
 } from "./projectIssues.mjs";
 
 const OWNER =
@@ -34,12 +35,7 @@ const lifecycleFixture = JSON.parse(
   ),
 );
 
-function lifecycleEvent({
-  id,
-  pubkey = OWNER,
-  createdAt,
-  tags,
-}) {
+function lifecycleEvent({ id, pubkey = OWNER, createdAt, tags }) {
   return { id, kind: 1, pubkey, created_at: createdAt, content: "", tags };
 }
 
@@ -57,7 +53,14 @@ function lifecycleAssignment(id, writer, createdAt, extraTags = []) {
   });
 }
 
-function lifecycleProgress(id, writer, assignment, createdAt, phase = "working", extraTags = []) {
+function lifecycleProgress(
+  id,
+  writer,
+  assignment,
+  createdAt,
+  phase = "working",
+  extraTags = [],
+) {
   return lifecycleEvent({
     id,
     pubkey: writer,
@@ -211,12 +214,7 @@ test("lifecycle parser rejects wrong roots and repos, and expires old working pr
     ["a", `30617:${OWNER}:wrong`],
   ]);
   const valid = lifecycleAssignment("3".repeat(64), writer, 120);
-  const oldProgress = lifecycleProgress(
-    "4".repeat(64),
-    writer,
-    valid.id,
-    130,
-  );
+  const oldProgress = lifecycleProgress("4".repeat(64), writer, valid.id, 130);
   const signals = myBuzzLifecycleSignalsForIssue(
     issueEvent(),
     [wrongRoot, wrongRepo, valid, oldProgress],
@@ -282,6 +280,33 @@ test("renders the latest valid owner workflow status independently of NIP-34", (
   assert.equal(issue.status, "Implemented");
   assert.equal(issue.workflowStatus?.eventId, implemented.id);
   assert.equal(issue.workflowStatus?.reason, null);
+});
+
+test("renders implemented only from the current assigned MyBuzz writer", () => {
+  const writer = "d".repeat(64);
+  const assignment = lifecycleAssignment("1".repeat(64), writer, 100);
+  const implemented = workflowStatusEvent({
+    id: "2".repeat(64),
+    pubkey: writer,
+    state: "implemented",
+    createdAt: 200,
+  });
+  const forged = workflowStatusEvent({
+    id: "3".repeat(64),
+    pubkey: ATTACKER,
+    state: "implemented",
+    createdAt: 300,
+  });
+
+  const issue = eventToProjectIssue(
+    issueEvent(),
+    [],
+    [assignment, implemented, forged],
+  );
+
+  assert.equal(issue.status, "Implemented");
+  assert.equal(issue.workflowStatus?.eventId, implemented.id);
+  assert.notEqual(issue.workflowStatus?.eventId, forged.id);
 });
 
 test("workflow status parser fails closed for invalid envelopes and reasons", () => {
@@ -510,7 +535,7 @@ function issueEvent(overrides = {}) {
 
 function statusEvent({ kind, pubkey, createdAt }) {
   return {
-    id: `status-${pubkey.slice(0, 8)}-${createdAt}`,
+    id: `${pubkey.slice(0, 62)}${createdAt.toString(16).padStart(2, "0")}`,
     kind,
     pubkey,
     created_at: createdAt,
@@ -647,6 +672,84 @@ test("native NIP-34 status events cannot change the custom workflow header", () 
   const issue = eventToProjectIssue(issueEvent(), [attackerClosed]);
 
   assert.equal(issue.status, PROJECT_ISSUE_STATUS.TRIAGE);
+});
+
+test("an authorized native close suppresses a historical custom workflow status", () => {
+  const readyForTest = workflowStatusEvent({
+    state: "ready-for-test",
+    reason: "Ready for testing.",
+    createdAt: 200,
+  });
+  const closed = statusEvent({
+    kind: 1632,
+    pubkey: OWNER,
+    createdAt: 300,
+  });
+
+  const issue = eventToProjectIssue(issueEvent(), [closed], [readyForTest]);
+
+  assert.equal(issue.status, PROJECT_ISSUE_STATUS.CLOSED);
+  assert.equal(issue.workflowStatus?.state, "ready-for-test");
+});
+
+test("only open roots remain after native close and authoritative tombstone reduction", () => {
+  const root = issueEvent();
+  const close = statusEvent({ kind: 1632, pubkey: AUTHOR, createdAt: 300 });
+  const tombstone = {
+    id: "d".repeat(64),
+    kind: 5,
+    pubkey: OWNER,
+    created_at: 300,
+    content: "",
+    tags: [["e", root.id, "", "root"]],
+  };
+  const malformedTombstone = {
+    ...tombstone,
+    id: "f".repeat(64),
+    pubkey: ATTACKER,
+  };
+  const openRoot = issueEvent({ id: "a".repeat(64), created_at: 101 });
+
+  assert.deepEqual(projectIssueEventsToIssues([root, openRoot], [close]), [
+    eventToProjectIssue(openRoot),
+  ]);
+  assert.deepEqual(
+    projectIssueEventsToIssues([root, openRoot], [], [], [], undefined, [
+      tombstone,
+    ]),
+    [eventToProjectIssue(openRoot)],
+  );
+  assert.equal(
+    projectIssueEventsToIssues([root], [], [], [], undefined, [
+      malformedTombstone,
+    ]).length,
+    1,
+  );
+});
+
+test("terminal filtering is stable after reload and ignores malformed close events", () => {
+  const root = issueEvent();
+  const status = workflowStatusEvent({
+    state: "ready-for-test",
+    reason: "Ready for testing.",
+    createdAt: 200,
+  });
+  const close = statusEvent({ kind: 1632, pubkey: OWNER, createdAt: 300 });
+  const malformed = {
+    ...close,
+    pubkey: ATTACKER,
+    tags: [["e", root.id, "", "root"]],
+  };
+
+  assert.equal(projectIssueEventsToIssues([root], [close], [status]).length, 0);
+  assert.equal(
+    projectIssueEventsToIssues([root], [close], [status].reverse()).length,
+    0,
+  );
+  assert.equal(
+    projectIssueEventsToIssues([root], [malformed], [status])[0].status,
+    "Ready for Test",
+  );
 });
 
 test.skip("honors status events from the issue author and repo owner", () => {

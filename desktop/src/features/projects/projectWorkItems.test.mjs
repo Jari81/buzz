@@ -18,9 +18,9 @@ const REVIEW_COORDINATOR = "c".repeat(64);
 const REPO_DTAG = "relay";
 const REPO_ADDRESS = `30617:${REPO_OWNER}:${REPO_DTAG}`;
 
-const ISSUE_ID = "i".repeat(64);
-const PR_ID = "p".repeat(64);
-const PR_ID_2 = "q".repeat(64);
+const ISSUE_ID = "1".repeat(64);
+const PR_ID = "2".repeat(64);
+const PR_ID_2 = "4".repeat(64);
 
 // Two projects that both contain the same repository.
 const projectA = {
@@ -95,7 +95,7 @@ test("fetchProjectsWorkItems threads project review authority into issue reducti
   const issue = makeIssue(ISSUE_ID);
   const reviewId = "9".repeat(64);
   const marker = {
-    id: "3".repeat(64),
+    id: "5".repeat(64),
     kind: 1,
     pubkey: REVIEW_COORDINATOR,
     created_at: 250,

@@ -8,6 +8,7 @@ export type ProjectIssueStatus =
   | "Code-QS"
   | "To Be Published"
   | "Ready for Test"
+  | "Closed"
   | "Done";
 
 export type MyBuzzWorkflowStatus = {
@@ -130,6 +131,7 @@ export function projectIssueEventsToIssues(
   commentEvents?: RelayEvent[],
   additionalStatusActors?: string[],
   reviewAuthority?: ProjectIssueReviewAuthority,
+  deletionEvents?: RelayEvent[],
 ): ProjectIssue[];
 export function nextProjectIssueStatusCreatedAt(
   issue: ProjectIssue,

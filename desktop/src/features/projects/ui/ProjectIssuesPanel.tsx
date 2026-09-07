@@ -25,6 +25,7 @@ import {
   MAX_REJECTION_REASON_LENGTH,
   canWriteMyBuzzWorkflowStatus,
   type MyBuzzWorkflowStatusState,
+  useUpdateProjectIssueLifecycleMutation,
   useSubmitProjectIssueVerdictMutation,
   useUpdateProjectIssueStatusMutation,
 } from "@/features/projects/issueStatus";
@@ -598,6 +599,8 @@ function IssueMetaRail({
   const canAssignOthers =
     Boolean(viewer) && (isAuthor || isOwner || isManagedAgentOwner);
   const canChangeStatus = canWriteMyBuzzWorkflowStatus(viewer);
+  const canManageLifecycle =
+    Boolean(viewer) && (isAuthor || isOwner || isManagedAgentOwner);
 
   return (
     <aside
@@ -618,6 +621,9 @@ function IssueMetaRail({
             {issue.status}
           </span>
         )}
+        {canManageLifecycle ? (
+          <IssueLifecycleActions issue={issue} project={project} />
+        ) : null}
       </OverviewRailSection>
       <IssueReviewSection
         issue={issue}
@@ -678,6 +684,52 @@ function IssueMetaRail({
         </dl>
       </OverviewRailSection>
     </aside>
+  );
+}
+
+function IssueLifecycleActions({
+  issue,
+  project,
+}: {
+  issue: ProjectIssue;
+  project: Project;
+}) {
+  const { isPending, mutateAsync } =
+    useUpdateProjectIssueLifecycleMutation(project);
+  const submit = async (action: "closed" | "deleted") => {
+    const label =
+      action === "closed" ? "mark this issue obsolete" : "delete this issue";
+    if (!globalThis.confirm(`Confirm: ${label}?`)) return;
+    try {
+      await mutateAsync({ action, issue });
+      toast.success(
+        action === "closed" ? "Issue marked obsolete." : "Issue deleted.",
+      );
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : `Failed to ${label}.`,
+      );
+    }
+  };
+  return (
+    <div className="mt-3 flex gap-2">
+      <button
+        className="rounded-md border border-border/60 px-2 py-1 text-xs disabled:opacity-60"
+        disabled={isPending}
+        onClick={() => void submit("closed")}
+        type="button"
+      >
+        Obsolete
+      </button>
+      <button
+        className="rounded-md border border-destructive/60 px-2 py-1 text-xs text-destructive disabled:opacity-60"
+        disabled={isPending}
+        onClick={() => void submit("deleted")}
+        type="button"
+      >
+        Delete
+      </button>
+    </div>
   );
 }
 

@@ -3,6 +3,8 @@ import { useMutation } from "@tanstack/react-query";
 import { relayClient } from "@/shared/api/relayClient";
 import { signRelayEvent } from "@/shared/api/tauri";
 import {
+  KIND_DELETION,
+  KIND_GIT_STATUS_CLOSED,
   KIND_GIT_STATUS_MERGED,
   KIND_GIT_STATUS_OPEN,
 } from "@/shared/constants/kinds";
@@ -28,6 +30,8 @@ const MYBUZZ_REASON_REQUIRED_STATES = new Set([
 
 export type MyBuzzWorkflowStatusState =
   (typeof MYBUZZ_WORKFLOW_STATUS_STATES)[number];
+
+export type ProjectIssueLifecycleAction = "closed" | "deleted";
 
 function hasControlCharacters(value: string): boolean {
   return [...value].some((character) => {
@@ -168,6 +172,42 @@ async function updateProjectIssueStatus({
   );
 }
 
+async function updateProjectIssueLifecycle({
+  issue,
+  project,
+  action,
+}: {
+  issue: ProjectIssue;
+  project: Project;
+  action: ProjectIssueLifecycleAction;
+}): Promise<void> {
+  const createdAt = nextProjectIssueStatusCreatedAt(
+    issue,
+    Math.floor(Date.now() / 1_000),
+  );
+  const event = await signRelayEvent({
+    kind: action === "closed" ? KIND_GIT_STATUS_CLOSED : KIND_DELETION,
+    content: "",
+    createdAt,
+    tags:
+      action === "closed"
+        ? [
+            ["e", issue.id, "", "root"],
+            ["a", project.repoAddress],
+            ...[...new Set([project.owner, issue.author])].map((recipient) => [
+              "p",
+              recipient.toLowerCase(),
+            ]),
+          ]
+        : [["e", issue.id, "", "root"]],
+  });
+  await relayClient.publishEvent(
+    event,
+    `Timed out ${action === "closed" ? "closing" : "deleting"} issue.`,
+    `Failed to ${action === "closed" ? "close" : "delete"} issue.`,
+  );
+}
+
 async function submitProjectIssueVerdict({
   issue,
   project,
@@ -229,6 +269,22 @@ export function useUpdateProjectIssueStatusMutation(
     }) => {
       if (!project) throw new Error("No project selected.");
       return updateProjectIssueStatus({ ...input, project });
+    },
+    onSuccess: invalidate,
+  });
+}
+
+export function useUpdateProjectIssueLifecycleMutation(
+  project: Project | null | undefined,
+) {
+  const invalidate = useProjectIssueWriteInvalidation(project);
+  return useMutation({
+    mutationFn: (input: {
+      action: ProjectIssueLifecycleAction;
+      issue: ProjectIssue;
+    }) => {
+      if (!project) throw new Error("No project selected.");
+      return updateProjectIssueLifecycle({ ...input, project });
     },
     onSuccess: invalidate,
   });

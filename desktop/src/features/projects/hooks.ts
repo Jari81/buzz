@@ -235,35 +235,45 @@ async function fetchProjectIssues(
     "#a": [project.repoAddress],
     limit: 200,
   });
-  const [issueEvents, statusEvents, commentEvents, assignmentEvents] =
-    await Promise.all([
-      issuePromise,
-      relayClient.fetchEvents({
-        kinds: [
-          KIND_GIT_STATUS_OPEN,
-          KIND_GIT_STATUS_MERGED,
-          KIND_GIT_STATUS_CLOSED,
-          KIND_GIT_STATUS_DRAFT,
-        ],
-        "#a": [project.repoAddress],
-        limit: 500,
+  const [
+    issueEvents,
+    statusEvents,
+    commentEvents,
+    assignmentEvents,
+    deletionEvents,
+  ] = await Promise.all([
+    issuePromise,
+    relayClient.fetchEvents({
+      kinds: [
+        KIND_GIT_STATUS_OPEN,
+        KIND_GIT_STATUS_MERGED,
+        KIND_GIT_STATUS_CLOSED,
+        KIND_GIT_STATUS_DRAFT,
+      ],
+      "#a": [project.repoAddress],
+      limit: 500,
+    }),
+    // Custom MyBuzz workflow status events are kind:1 comments. Fetch by
+    // issue root so an active repository comment stream cannot evict the
+    // most recent status from the bounded repository-wide query.
+    issuePromise.then((events) =>
+      fetchProjectEventsExhaustively([KIND_TEXT_NOTE], {
+        "#e": events.map((event) => event.id),
       }),
-      // Custom MyBuzz workflow status events are kind:1 comments. Fetch by
-      // issue root so an active repository comment stream cannot evict the
-      // most recent status from the bounded repository-wide query.
-      issuePromise.then((events) =>
-        fetchProjectEventsExhaustively([KIND_TEXT_NOTE], {
-          "#e": events.map((event) => event.id),
-        }),
-      ),
-      // Assignment state must reduce over the complete operation history, not
-      // whatever survives the bounded comment window above. Keyed by issue id
-      // (`#e`) because that is the only tag constraint the relay applies
-      // before its SQL LIMIT — see fetchAssignmentOperationEvents.
-      issuePromise.then((events) =>
-        fetchAssignmentOperationEvents(events.map((event) => event.id)),
-      ),
-    ]);
+    ),
+    // Assignment state must reduce over the complete operation history, not
+    // whatever survives the bounded comment window above. Keyed by issue id
+    // (`#e`) because that is the only tag constraint the relay applies
+    // before its SQL LIMIT — see fetchAssignmentOperationEvents.
+    issuePromise.then((events) =>
+      fetchAssignmentOperationEvents(events.map((event) => event.id)),
+    ),
+    issuePromise.then((events) =>
+      fetchProjectEventsExhaustively([KIND_DELETION], {
+        "#e": events.map((event) => event.id),
+      }),
+    ),
+  ]);
 
   return projectIssueEventsToIssues(
     issueEvents,
@@ -271,6 +281,7 @@ async function fetchProjectIssues(
     mergeEventsById(commentEvents, assignmentEvents),
     [],
     project.reviewAuthority,
+    deletionEvents,
   );
 }
 

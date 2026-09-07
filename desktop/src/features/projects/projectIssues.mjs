@@ -61,6 +61,49 @@ export const PROJECT_ISSUE_STATUS = {
   CLOSED: "Closed",
 };
 
+const NATIVE_ISSUE_STATUS_KINDS = new Set([1630, 1631, 1632, 1633]);
+
+function isExactRootRepoBinding(event, issue) {
+  const repoAddress = getTag(issue, "a");
+  return (
+    Boolean(repoAddress) &&
+    exactlyOneTag(event, "e", [issue.id, "", "root"]) &&
+    exactlyOneTag(event, "a", [repoAddress])
+  );
+}
+
+function nativeLifecycleForIssue(issue, statusEvents) {
+  const allowedActors = allowedActorsForRoot(issue);
+  return (
+    statusEvents
+      .filter(
+        (event) =>
+          NATIVE_ISSUE_STATUS_KINDS.has(event.kind) &&
+          isLowercaseHex64(event.pubkey) &&
+          Number.isInteger(event.created_at) &&
+          allowedActors.has(event.pubkey) &&
+          isExactRootRepoBinding(event, issue),
+      )
+      .sort(descendingEventOrder)[0] ?? null
+  );
+}
+
+function isAuthoritativeIssueTombstone(issue, deletionEvents) {
+  const allowedActors = allowedActorsForRoot(issue);
+  return deletionEvents.some(
+    (event) =>
+      event.kind === 5 &&
+      isLowercaseHex64(event.pubkey) &&
+      allowedActors.has(event.pubkey) &&
+      event.tags.length === 1 &&
+      event.tags[0]?.length === 4 &&
+      event.tags[0]?.[0] === "e" &&
+      event.tags[0]?.[1] === issue.id &&
+      event.tags[0]?.[2] === "" &&
+      event.tags[0]?.[3] === "root",
+  );
+}
+
 function isNonEmptyString(value) {
   return typeof value === "string" && value.length > 0;
 }
@@ -262,9 +305,7 @@ function lifecycleProgress(event, issueId, repoAddress, assignment) {
       ["phase", phase],
       ...(phase === "working" ? [] : [["reason", reason]]),
     ]) ||
-    (phase === "working"
-      ? reason !== undefined
-      : !isPrintableReason(reason))
+    (phase === "working" ? reason !== undefined : !isPrintableReason(reason))
   ) {
     return null;
   }
@@ -277,13 +318,18 @@ export function myBuzzLifecycleSignalsForIssue(
   now = Math.floor(Date.now() / 1_000),
 ) {
   const repoAddress = getTag(issue, "a");
-  if (!repoAddress) return { assignment: null, progress: null, projection: null };
+  if (!repoAddress)
+    return { assignment: null, progress: null, projection: null };
   let assignment = null;
   for (const event of [...issueCommentEvents].sort(
     (left, right) =>
       left.created_at - right.created_at || left.id.localeCompare(right.id),
   )) {
-    const operation = lifecycleAssignmentOperation(event, issue.id, repoAddress);
+    const operation = lifecycleAssignmentOperation(
+      event,
+      issue.id,
+      repoAddress,
+    );
     if (!operation) continue;
     if (operation.type === "assignment") {
       if (!assignment) assignment = { id: event.id, writer: operation.writer };
@@ -295,7 +341,8 @@ export function myBuzzLifecycleSignalsForIssue(
       assignment = null;
     }
   }
-  if (!assignment) return { assignment: null, progress: null, projection: null };
+  if (!assignment)
+    return { assignment: null, progress: null, projection: null };
   const progress = issueCommentEvents
     .map((event) => lifecycleProgress(event, issue.id, repoAddress, assignment))
     .filter(Boolean)
@@ -407,14 +454,19 @@ function isMyBuzzWorkflowStatusEvent(event) {
   );
 }
 
-function workflowStatusesForIssue(issue, issueCommentEvents) {
+function workflowStatusesForIssue(
+  issue,
+  issueCommentEvents,
+  assignedWriter = null,
+) {
   const repoAddress = getTag(issue, "a");
   if (!repoAddress) return [];
+  const normalizedAssignedWriter =
+    typeof assignedWriter === "string" ? assignedWriter.toLowerCase() : null;
   const byId = new Map();
   for (const event of issueCommentEvents) {
     if (
       event.kind !== 1 ||
-      event.pubkey.toLowerCase() !== MYBUZZ_WORKFLOW_STATUS_OWNER ||
       !isLowercaseHex64(event.id) ||
       !isLowercaseHex64(event.pubkey) ||
       !Number.isInteger(event.created_at)
@@ -422,7 +474,16 @@ function workflowStatusesForIssue(issue, issueCommentEvents) {
       continue;
     }
     const parsed = exactWorkflowStatusTags(event, issue.id, repoAddress);
-    if (!parsed || byId.has(event.id)) continue;
+    const signer = event.pubkey.toLowerCase();
+    const assignedWriterImplemented =
+      parsed?.state === "implemented" && signer === normalizedAssignedWriter;
+    if (
+      !parsed ||
+      byId.has(event.id) ||
+      (signer !== MYBUZZ_WORKFLOW_STATUS_OWNER && !assignedWriterImplemented)
+    ) {
+      continue;
+    }
     byId.set(event.id, { event, ...parsed });
   }
   return [...byId.values()].sort(
@@ -832,15 +893,25 @@ export function eventToProjectIssue(
       }
     : null;
   const directVerdict = currentReview?.verdict?.kind ?? null;
-  const workflowStatuses = workflowStatusesForIssue(issue, issueCommentEvents);
+  const nativeLifecycle = nativeLifecycleForIssue(issue, statusEvents);
+  const workflowStatuses = workflowStatusesForIssue(
+    issue,
+    issueCommentEvents,
+    lifecycleSignals.assignment?.writer ?? null,
+  );
   const workflowStatus = workflowStatuses[0] ?? null;
   const status =
-    directVerdict === "accepted"
-      ? PROJECT_ISSUE_STATUS.DONE
-      : workflowStatus
-        ? MYBUZZ_WORKFLOW_STATUS_LABELS[workflowStatus.state]
-        : PROJECT_ISSUE_STATUS.TRIAGE;
-  const effectiveStatus = rawVerdict ?? workflowStatus?.event ?? null;
+    nativeLifecycle?.kind === 1632
+      ? PROJECT_ISSUE_STATUS.CLOSED
+      : directVerdict === "accepted"
+        ? PROJECT_ISSUE_STATUS.DONE
+        : currentReview
+          ? PROJECT_ISSUE_STATUS.IN_REVIEW
+          : workflowStatus
+            ? MYBUZZ_WORKFLOW_STATUS_LABELS[workflowStatus.state]
+            : PROJECT_ISSUE_STATUS.TRIAGE;
+  const effectiveStatus =
+    nativeLifecycle ?? rawVerdict ?? workflowStatus?.event ?? null;
   const comments = commentsForIssue(issueCommentEvents);
   const title =
     getTag(issue, "subject") ||
@@ -891,8 +962,10 @@ export function projectIssueEventsToIssues(
   commentEvents = [],
   additionalStatusActors = [],
   reviewAuthority,
+  deletionEvents = [],
 ) {
   return [...issueEvents]
+    .filter((issue) => !isAuthoritativeIssueTombstone(issue, deletionEvents))
     .map((issue) =>
       eventToProjectIssue(
         issue,
@@ -902,6 +975,7 @@ export function projectIssueEventsToIssues(
         reviewAuthority,
       ),
     )
+    .filter((issue) => issue.status !== PROJECT_ISSUE_STATUS.CLOSED)
     .sort((left, right) => right.updatedAt - left.updatedAt);
 }
 
