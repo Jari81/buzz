@@ -868,7 +868,11 @@ export function UserProfilePanel({
           <AgentConfigurationFocusedView fields={agentSettingsFields} />
           {relayAgent ? (
             <div className="pt-4">
-              <RolePromptStatus owner={ownerPubkey} role={rolePromptRole} />
+              <RolePromptStatus
+                owner={ownerPubkey}
+                role={rolePromptRole}
+                isCurrentUserOwner={isCurrentUserOwner}
+              />
             </div>
           ) : null}
         </>
