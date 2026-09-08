@@ -11,6 +11,7 @@ use sqlx::{PgPool, Row as _};
 
 use crate::error::Result;
 use crate::CommunityId;
+use buzz_core::kind::KIND_ROLE_PROMPT;
 
 /// A single relay member record.
 #[derive(Debug, Clone)]
@@ -373,6 +374,21 @@ pub async fn bootstrap_owner(
     .execute(&mut *tx)
     .await?;
 
+    // Role-prompt heads are global NIP-33 coordinates keyed by their author.
+    // An owner rotation cannot replace an old owner's coordinate, so retire all
+    // non-current heads inside the same ownership transaction. The new owner
+    // must publish fresh prompts (or retain prompts from an earlier tenure);
+    // a runner never has an ambiguous old-owner fallback.
+    sqlx::query(
+        "UPDATE events SET deleted_at = now() \
+         WHERE community_id = $1 AND kind = $2 AND pubkey <> decode($3, 'hex') AND deleted_at IS NULL",
+    )
+    .bind(community.as_uuid())
+    .bind(KIND_ROLE_PROMPT as i32)
+    .bind(&pubkey)
+    .execute(&mut *tx)
+    .await?;
+
     tx.commit().await?;
     Ok(())
 }
@@ -551,6 +567,19 @@ pub async fn transfer_ownership(
     .execute(&mut *tx)
     .await?;
 
+    // NIP-33 keys role prompts by signer. Retire every prior owner's head in
+    // this same transaction so only the current owner can have a readable head
+    // for writer, review, or host after a rotation.
+    sqlx::query(
+        "UPDATE events SET deleted_at = now() \
+         WHERE community_id = $1 AND kind = $2 AND pubkey <> decode($3, 'hex') AND deleted_at IS NULL",
+    )
+    .bind(community.as_uuid())
+    .bind(KIND_ROLE_PROMPT as i32)
+    .bind(&pubkey)
+    .execute(&mut *tx)
+    .await?;
+
     tx.commit().await?;
     Ok(TransferResult::Transferred { previous_owner })
 }
@@ -662,6 +691,15 @@ mod tests {
 
     fn test_pubkey() -> String {
         format!("{:064x}", Uuid::new_v4().as_u128())
+    }
+
+    fn pubkey_bytes(pubkey: &str) -> Vec<u8> {
+        (0..pubkey.len())
+            .step_by(2)
+            .map(|offset| {
+                u8::from_str_radix(&pubkey[offset..offset + 2], 16).expect("test pubkey hex")
+            })
+            .collect()
     }
 
     async fn assert_role(pool: &PgPool, community: CommunityId, pubkey: &str, role: &str) {
@@ -835,6 +873,49 @@ mod tests {
 
         assert_role(&pool, community, &new_owner, "owner").await;
         assert_role(&pool, community, &old_owner, "member").await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn transfer_ownership_retires_previous_owner_role_prompt_heads() {
+        let pool = setup_pool().await;
+        let (community, old_owner) = owned_community(&pool).await;
+        let new_owner = test_pubkey();
+        let now = Utc::now();
+
+        for (id, pubkey) in [([1_u8; 32], &old_owner), ([2_u8; 32], &new_owner)] {
+            sqlx::query(
+                "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, d_tag) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            )
+            .bind(community.as_uuid())
+            .bind(id.as_slice())
+            .bind(pubkey_bytes(pubkey))
+            .bind(now)
+            .bind(KIND_ROLE_PROMPT as i32)
+            .bind(serde_json::json!([["d", "writer"]]))
+            .bind("public prompt")
+            .bind([3_u8; 64].as_slice())
+            .bind("writer")
+            .execute(&pool)
+            .await
+            .expect("insert role-prompt head");
+        }
+
+        transfer_ownership(&pool, community, &new_owner, &old_owner)
+            .await
+            .expect("transfer ownership");
+
+        let live_heads: Vec<Vec<u8>> = sqlx::query_scalar(
+            "SELECT pubkey FROM events \
+             WHERE community_id = $1 AND kind = $2 AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(KIND_ROLE_PROMPT as i32)
+        .fetch_all(&pool)
+        .await
+        .expect("read live role-prompt heads");
+        assert_eq!(live_heads, vec![pubkey_bytes(&new_owner)]);
     }
 
     /// Transferring to the current sole owner is a no-op (`AlreadyOwner`).

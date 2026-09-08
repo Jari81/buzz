@@ -17,6 +17,8 @@ pub mod mentions;
 pub mod nip_oa;
 
 pub use builders::*;
+/// Role coordinates accepted by [`build_role_prompt`].
+pub use buzz_core::role_prompt::RolePromptRole;
 
 /// Re-export kind constants so consumers don't need buzz-core directly.
 pub use buzz_core::kind;

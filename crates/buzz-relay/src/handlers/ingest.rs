@@ -29,13 +29,14 @@ use buzz_core::kind::{
     KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
     KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
     KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION,
-    KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED,
-    KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
-    KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM,
-    KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
-    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
-    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_READ_STATE, KIND_REPORT, KIND_ROLE_PROMPT, KIND_STREAM_MESSAGE,
+    KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT,
+    KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2,
+    KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS,
+    KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
+    RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
+use buzz_core::role_prompt::{RolePromptPayload, RolePromptRole};
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
 use buzz_core::CommunityId;
@@ -348,7 +349,8 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         KIND_TEXT_NOTE | KIND_LONG_FORM => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
         | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT
-        | KIND_PRIVATE_MANAGED_AGENT | KIND_TEAM_CATALOG | super::push_lease::KIND_PUSH_LEASE => {
+        | KIND_PRIVATE_MANAGED_AGENT | KIND_TEAM_CATALOG | KIND_ROLE_PROMPT
+        | super::push_lease::KIND_PUSH_LEASE => {
             Ok(Scope::UsersWrite)
         }
         // NIP-AM: agent turn metrics are agent-authored global events (encrypted to owner).
@@ -563,6 +565,8 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             | KIND_MANAGED_AGENT
             | KIND_PRIVATE_MANAGED_AGENT
             | KIND_TEAM_CATALOG
+            // Owner-authored role prompts are NIP-33 global state, never channel content.
+            | KIND_ROLE_PROMPT
             // NIP-34: git events use `a` tags (repo reference), not `h` tags (channel scope).
             // Parameterized replaceable kinds are keyed by (pubkey, kind, d_tag).
             | KIND_GIT_REPO_ANNOUNCEMENT
@@ -1300,6 +1304,78 @@ fn validate_team_catalog_envelope(event: &Event) -> Result<(), String> {
     validate_shared_tag(event, LABEL)?;
     single_bounded_d_tag(event, LABEL)?;
     Ok(())
+}
+
+/// Validate the public envelope of an owner-authored global role prompt.
+///
+/// Kind 30180 is addressed by exactly one two-element `d` tag: `writer`,
+/// `review`, or `host`. Its body is strict, public-safe version-one JSON. A
+/// matching digest prevents a corrupt replacement head from being stored and
+/// later silently ignored by readers. Role authorization is intentionally a
+/// separate async database check in [`validate_role_prompt_owner`].
+fn validate_role_prompt_envelope(event: &Event) -> Result<(), String> {
+    const LABEL: &str = "role-prompt event";
+    // This global event has no metadata extension surface: an arbitrary tag is
+    // as publicly visible as the JSON body and could otherwise smuggle a secret
+    // past the strict body schema. The sole canonical envelope is `["d", role]`.
+    if event.tags.len() != 1 {
+        return Err(format!("{LABEL} tags must be exactly one `d` tag"));
+    }
+    let Some(tag) = event.tags.iter().next() else {
+        return Err(format!("{LABEL} tags must be exactly one `d` tag"));
+    };
+    let d_parts = tag.as_slice();
+    if d_parts.len() != 2 || d_parts.first().map(String::as_str) != Some("d") {
+        return Err(format!(
+            "{LABEL} tags must be exactly one two-element `d` tag"
+        ));
+    }
+    let role = d_parts[1]
+        .parse::<RolePromptRole>()
+        .map_err(|error| format!("{LABEL} {error}"))?;
+    if event
+        .tags
+        .iter()
+        .any(|tag| tag.as_slice().first().map(String::as_str) == Some("h"))
+    {
+        return Err(format!("{LABEL} must not have an `h` tag"));
+    }
+    RolePromptPayload::parse_for_role(&event.content, role)
+        .map(|_| ())
+        .map_err(|error| format!("{LABEL} {error}"))
+}
+
+/// Require the event signer to be the community owner for a role-prompt write.
+///
+/// This consults the durable, tenant-scoped relay roster even on an open relay:
+/// openness admits normal participants but never grants authority to replace a
+/// global owner prompt.
+async fn validate_role_prompt_owner(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+) -> Result<(), IngestError> {
+    let author_hex = event.pubkey.to_hex();
+    let role = state
+        .db
+        .get_relay_member(tenant.community(), &author_hex)
+        .await
+        .map_err(|error| {
+            IngestError::Internal(format!(
+                "error: database error checking role-prompt ownership: {error}"
+            ))
+        })?
+        .map(|member| member.role);
+    if !is_role_prompt_owner(role.as_deref()) {
+        return Err(IngestError::AuthFailed(
+            "restricted: role prompts must be authored by the community owner".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_role_prompt_owner(role: Option<&str>) -> bool {
+    role == Some("owner")
 }
 
 /// Maximum number of member `a` tags on a kind:30621 project.
@@ -2556,6 +2632,12 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
+    if kind_u32 == KIND_ROLE_PROMPT {
+        validate_role_prompt_envelope(&event)
+            .map_err(|error| IngestError::Rejected(format!("invalid: {error}")))?;
+        validate_role_prompt_owner(tenant, state, &event).await?;
+    }
+
     if kind_u32 == KIND_TEAM_CATALOG {
         validate_team_catalog_envelope(&event)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
@@ -3447,6 +3529,72 @@ mod tests {
             required_scope_for_kind(KIND_LONG_FORM, &dummy).unwrap(),
             Scope::MessagesWrite,
         );
+    }
+
+    #[test]
+    fn role_prompt_envelope_requires_a_matching_hashed_payload() {
+        let event = EventBuilder::new(
+            Kind::Custom(30180),
+            r#"{"v":1,"role":"writer","revision":7,"prompt":"Write focused, tested changes.","sha256":"56056faf2d613b7f410197490980826b76990b9727a1ce836fb410fb157e6d11"}"#,
+        )
+        .tags([nostr::Tag::parse(["d", "writer"]).unwrap()])
+        .sign_with_keys(&nostr::Keys::generate())
+        .unwrap();
+
+        assert!(validate_role_prompt_envelope(&event).is_ok());
+        assert!(is_global_only_kind(30180));
+        assert_eq!(
+            required_scope_for_kind(30180, &event).unwrap(),
+            Scope::UsersWrite
+        );
+    }
+
+    #[test]
+    fn role_prompt_envelope_rejects_a_role_that_does_not_match_its_d_tag() {
+        let event = EventBuilder::new(
+            Kind::Custom(30180),
+            r#"{"v":1,"role":"review","revision":7,"prompt":"Write focused, tested changes.","sha256":"56056faf2d613b7f410197490980826b76990b9727a1ce836fb410fb157e6d11"}"#,
+        )
+        .tags([nostr::Tag::parse(["d", "writer"]).unwrap()])
+        .sign_with_keys(&nostr::Keys::generate())
+        .unwrap();
+
+        let error = validate_role_prompt_envelope(&event).unwrap_err();
+        assert!(error.contains("must match"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn role_prompt_envelope_rejects_any_noncanonical_tag_shape() {
+        let content = RolePromptPayload::new(RolePromptRole::Host, 1, "Public host instructions.")
+            .unwrap()
+            .to_json()
+            .unwrap();
+        let event_with_secret_tag = EventBuilder::new(Kind::Custom(30180), &content)
+            .tags([
+                nostr::Tag::parse(["d", "host"]).unwrap(),
+                nostr::Tag::parse(["secret", "must-never-be-public"]).unwrap(),
+            ])
+            .sign_with_keys(&nostr::Keys::generate())
+            .unwrap();
+        assert!(validate_role_prompt_envelope(&event_with_secret_tag)
+            .unwrap_err()
+            .contains("exactly one `d` tag"));
+
+        let event_with_extended_d = EventBuilder::new(Kind::Custom(30180), &content)
+            .tags([nostr::Tag::parse(["d", "host", "extra"]).unwrap()])
+            .sign_with_keys(&nostr::Keys::generate())
+            .unwrap();
+        assert!(validate_role_prompt_envelope(&event_with_extended_d)
+            .unwrap_err()
+            .contains("exactly one two-element `d` tag"));
+    }
+
+    #[test]
+    fn role_prompt_owner_authorization_accepts_only_the_owner_role() {
+        assert!(is_role_prompt_owner(Some("owner")));
+        assert!(!is_role_prompt_owner(Some("admin")));
+        assert!(!is_role_prompt_owner(Some("member")));
+        assert!(!is_role_prompt_owner(None));
     }
 
     #[test]

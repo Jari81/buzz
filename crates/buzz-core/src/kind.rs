@@ -117,6 +117,13 @@ pub const KIND_PUSH_LEASE: u32 = 30350;
 /// plus exact public projection bindings. See `docs/nips/NIP-PMA.md`.
 pub const KIND_PRIVATE_MANAGED_AGENT: u32 = 30179;
 
+/// Owner-authored global role prompt (parameterized replaceable).
+///
+/// The exactly-one `d` tag is one of `writer`, `review`, or `host`; its strict
+/// version-one non-secret JSON body repeats the role, carries a positive
+/// revision, and includes a lowercase SHA-256 of the exact prompt bytes.
+pub const KIND_ROLE_PROMPT: u32 = 30180;
+
 /// Kinds whose stored events are readable only by their author.
 ///
 /// The relay must never reveal the existence, count, tags, content, schedule,

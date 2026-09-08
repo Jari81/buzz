@@ -3,6 +3,7 @@
 //! All functions return `Result<nostr::EventBuilder, SdkError>`.
 //! The caller signs: `builder.sign_with_keys(&keys)?`.
 
+use buzz_core::role_prompt::{RolePromptPayload, RolePromptRole};
 use buzz_core::{
     kind::{
         KIND_AGENT_OBSERVER_FRAME, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_DELETION,
@@ -12,7 +13,7 @@ use buzz_core::{
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
         KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_PROJECT,
-        KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_ROLE_PROMPT, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -211,6 +212,25 @@ fn imeta_tags(media_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), Sdk
         tags.push(Tag::parse(parts).map_err(|e| SdkError::InvalidTag(e.to_string()))?);
     }
     Ok(())
+}
+
+/// Build an owner-authored global role prompt (kind 30180).
+///
+/// The caller must sign this event with the community owner's key. The relay
+/// enforces that authorization and verifies the strict payload before storing
+/// the NIP-33 head at the role's `d` coordinate.
+pub fn build_role_prompt(
+    role: RolePromptRole,
+    revision: u64,
+    prompt: &str,
+) -> Result<EventBuilder, SdkError> {
+    let payload = RolePromptPayload::new(role, revision, prompt)
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    let content = payload
+        .to_json()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    let tags = vec![tag(&["d", role.as_str()])?];
+    Ok(EventBuilder::new(Kind::Custom(KIND_ROLE_PROMPT as u16), content).tags(tags))
 }
 
 /// Build a stream message (kind 9).
@@ -2382,6 +2402,35 @@ mod tests {
         assert_eq!(ev.kind.as_u16(), 9);
         assert_eq!(ev.content, "hello");
         assert!(has_tag(&ev, "h", &cid.to_string()));
+    }
+
+    #[test]
+    fn role_prompt_builder_emits_a_hashed_writer_payload() {
+        let prompt = "Write focused, tested changes.";
+        let event = sign(build_role_prompt(RolePromptRole::Writer, 7, prompt).unwrap());
+
+        assert_eq!(event.kind.as_u16(), 30180);
+        assert_eq!(tag_values(&event, "d"), ["writer"]);
+
+        let payload: serde_json::Value = serde_json::from_str(&event.content).unwrap();
+        assert_eq!(payload["v"], 1);
+        assert_eq!(payload["role"], "writer");
+        assert_eq!(payload["revision"], 7);
+        assert_eq!(payload["prompt"], prompt);
+        assert_eq!(
+            payload["sha256"],
+            "56056faf2d613b7f410197490980826b76990b9727a1ce836fb410fb157e6d11"
+        );
+    }
+
+    #[test]
+    fn role_prompt_builder_rejects_a_zero_revision() {
+        let error =
+            build_role_prompt(RolePromptRole::Review, 0, "Review the candidate.").unwrap_err();
+        assert!(
+            error.to_string().contains("revision must be positive"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
