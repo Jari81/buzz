@@ -41,12 +41,6 @@ export const MYBUZZ_WORKFLOW_STATUS_LABELS = {
   "ready-for-test": "Ready for Test",
 };
 
-const MYBUZZ_WORKFLOW_STATUS_REASON_REQUIRED = new Set([
-  "triage",
-  "backlog",
-  "ready-for-test",
-]);
-
 export function isHumanDirectedIssueComment(body) {
   return /^(?:test|expected|reply)\s*:/i.test(body.trimStart());
 }
@@ -435,9 +429,7 @@ function exactWorkflowStatusTags(event, issueId, repoAddress) {
   const reason = reasons.length === 1 ? singleTagValue(event, "reason") : null;
   if (reasons.length === 1 && !reason) return null;
   if (
-    (MYBUZZ_WORKFLOW_STATUS_REASON_REQUIRED.has(state) &&
-      !isPrintableReason(reason)) ||
-    (reason !== null && !isPrintableReason(reason))
+    reason !== null && !isPrintableReason(reason)
   ) {
     return null;
   }
@@ -905,11 +897,9 @@ export function eventToProjectIssue(
       ? PROJECT_ISSUE_STATUS.CLOSED
       : directVerdict === "accepted"
         ? PROJECT_ISSUE_STATUS.DONE
-        : currentReview
-          ? PROJECT_ISSUE_STATUS.IN_REVIEW
-          : workflowStatus
-            ? MYBUZZ_WORKFLOW_STATUS_LABELS[workflowStatus.state]
-            : PROJECT_ISSUE_STATUS.TRIAGE;
+        : workflowStatus
+          ? MYBUZZ_WORKFLOW_STATUS_LABELS[workflowStatus.state]
+          : PROJECT_ISSUE_STATUS.TRIAGE;
   const effectiveStatus =
     nativeLifecycle ?? rawVerdict ?? workflowStatus?.event ?? null;
   const comments = commentsForIssue(issueCommentEvents);

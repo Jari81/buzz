@@ -96,10 +96,6 @@ const ISSUE_STATUS_SECTIONS = [
 
 const ISSUE_ROWS_PER_GROUP_STORAGE_KEY = "buzz.projects.issueRows";
 
-function requiresWorkflowStatusReason(state: MyBuzzWorkflowStatusState) {
-  return ["triage", "backlog", "ready-for-test"].includes(state);
-}
-
 function readIssueRowsPerGroup(): number {
   const stored = Number(
     globalThis.localStorage?.getItem(ISSUE_ROWS_PER_GROUP_STORAGE_KEY),
@@ -229,7 +225,7 @@ function IssueActivity({ issue }: { issue: ProjectIssue }) {
   return (
     <section className="space-y-3 p-4" data-testid="project-issue-activity">
       <p className="text-sm text-muted-foreground">
-        Workflow history is read-only and does not grant lifecycle authority.
+        Assignment, lifecycle, and technical evidence are recorded here as facts.
       </p>
       <ol className="space-y-2 border-l border-border/60 pl-3 text-sm">
         {issue.activity.map((entry) => (
@@ -382,22 +378,14 @@ function IssueStatusPicker({
   const [state, setState] =
     React.useState<MyBuzzWorkflowStatusState>(persistedState);
   const [reason, setReason] = React.useState("");
-  const [statusHint, setStatusHint] = React.useState<string | null>(null);
   React.useEffect(() => {
     setState(persistedState);
-    setStatusHint(null);
   }, [persistedState]);
 
   const handleSelect = React.useCallback(
     async (next: MyBuzzWorkflowStatusState) => {
-      if (requiresWorkflowStatusReason(next) && !reason.trim()) {
-        setState(persistedState);
-        setStatusHint("A reason is required for this workflow status.");
-        return;
-      }
       try {
         setState(next);
-        setStatusHint(null);
         await updateIssueStatus({ issue, reason, state: next });
         toast.success("Workflow status updated.");
         setReason("");
@@ -437,18 +425,9 @@ function IssueStatusPicker({
         className="min-h-16 w-full rounded-md border border-border/60 bg-background p-2 text-xs text-foreground"
         disabled={isPending}
         onChange={(event) => setReason(event.target.value)}
-        placeholder={
-          requiresWorkflowStatusReason(state)
-            ? "Reason required"
-            : "Reason (optional)"
-        }
+        placeholder="Note (optional)"
         value={reason}
       />
-      {statusHint ? (
-        <p className="text-xs text-destructive" role="status">
-          {statusHint}
-        </p>
-      ) : null}
     </div>
   );
 }
@@ -625,12 +604,14 @@ function IssueMetaRail({
           <IssueLifecycleActions issue={issue} project={project} />
         ) : null}
       </OverviewRailSection>
-      <IssueReviewSection
-        issue={issue}
-        key={`${issue.id}:${issue.currentReview?.id ?? "none"}`}
-        project={project}
-        viewer={viewer}
-      />
+      {issue.currentReview ? (
+        <IssueReviewSection
+          issue={issue}
+          key={`${issue.id}:${issue.currentReview.id}`}
+          project={project}
+          viewer={viewer}
+        />
+      ) : null}
       {issue.assignees.length > 0 || viewer ? (
         <OverviewRailSection title="Assignees">
           <IssueAssigneesRow

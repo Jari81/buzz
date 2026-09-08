@@ -14,7 +14,7 @@ const AUTHOR = "b".repeat(64);
 const ASSIGNEE = "d".repeat(64);
 const OA_OWNER = "e".repeat(64);
 
-test("builds the exact owner workflow status envelope", () => {
+test("builds an open owner workflow status envelope", () => {
   const issue = { id: "f".repeat(64), statusCreatedAt: null };
   const project = { repoAddress: `30617:${OWNER}:mybuzz` };
   assert.deepEqual(
@@ -37,9 +37,15 @@ test("builds the exact owner workflow status envelope", () => {
       ],
     },
   );
-  assert.throws(
-    () => buildMyBuzzWorkflowStatus({ issue, project, state: "triage" }),
-    /reason/i,
+  assert.deepEqual(
+    buildMyBuzzWorkflowStatus({ issue, project, state: "triage" }).tags,
+    [
+      ["e", issue.id, "", "root"],
+      ["a", project.repoAddress],
+      ["t", "mybuzz-workflow-status"],
+      ["workflow", "mybuzz-status-v1"],
+      ["state", "triage"],
+    ],
   );
   assert.throws(
     () =>

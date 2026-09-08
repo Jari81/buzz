@@ -22,12 +22,6 @@ export type ProjectIssueHumanVerdict = "accepted" | "rejected";
 
 export const MAX_REJECTION_REASON_LENGTH = 500;
 
-const MYBUZZ_REASON_REQUIRED_STATES = new Set([
-  "triage",
-  "backlog",
-  "ready-for-test",
-]);
-
 export type MyBuzzWorkflowStatusState =
   (typeof MYBUZZ_WORKFLOW_STATUS_STATES)[number];
 
@@ -119,11 +113,10 @@ export function buildMyBuzzWorkflowStatus({
   }
   const normalizedReason = reason?.trim() ?? "";
   if (
-    (MYBUZZ_REASON_REQUIRED_STATES.has(state) && !normalizedReason) ||
-    (normalizedReason &&
-      (normalizedReason !== reason || hasControlCharacters(normalizedReason)))
+    normalizedReason &&
+    (normalizedReason !== reason || hasControlCharacters(normalizedReason))
   ) {
-    throw new Error(`A printable reason is required for ${state}.`);
+    throw new Error("The status reason must contain printable characters only.");
   }
   return {
     content: `Status changed to ${state}.`,

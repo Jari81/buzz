@@ -309,13 +309,13 @@ test("renders implemented only from the current assigned MyBuzz writer", () => {
   assert.notEqual(issue.workflowStatus?.eventId, forged.id);
 });
 
-test("workflow status parser fails closed for invalid envelopes and reasons", () => {
-  const valid = workflowStatusEvent({ reason: "Initial classification." });
+test("workflow status parser accepts owner status without evidence notes", () => {
+  const valid = workflowStatusEvent();
   const invalid = [
     workflowStatusEvent({ pubkey: ATTACKER, id: "b".repeat(64) }),
     workflowStatusEvent({
       id: "c".repeat(64),
-      state: "ready-for-test",
+      reason: "  whitespace is not allowed  ",
     }),
     workflowStatusEvent({
       id: "d".repeat(64),
@@ -340,7 +340,7 @@ test("workflow status parser fails closed for invalid envelopes and reasons", ()
     false,
   );
   assert.equal(
-    issue.comments.some((comment) => comment.id === invalid[0].id),
+    issue.comments.some((comment) => comment.id === invalid[1].id),
     true,
   );
 });
@@ -348,7 +348,7 @@ test("workflow status parser fails closed for invalid envelopes and reasons", ()
 test("malformed workflow-status lookalikes remain ordinary discussion", () => {
   const malformed = workflowStatusEvent({
     id: "b".repeat(64),
-    state: "ready-for-test",
+    reason: "line\nbreak",
   });
   const issue = eventToProjectIssue(issueEvent(), [], [malformed]);
 
@@ -373,6 +373,23 @@ test("a valid human accepted verdict remains the only Done authority", () => {
 
   assert.equal(issue.status, PROJECT_ISSUE_STATUS.DONE);
   assert.equal(issue.workflowStatus?.state, "ready-for-test");
+});
+
+test("manual owner status remains visible when review evidence is present", () => {
+  const manualStatus = workflowStatusEvent({
+    state: "backlog",
+    createdAt: 400,
+  });
+  const issue = eventToProjectIssue(
+    issueEvent(),
+    [],
+    [currentReviewMarker(), manualStatus],
+    [],
+    REVIEW_AUTHORITY,
+  );
+
+  assert.equal(issue.status, "Backlog");
+  assert.equal(issue.currentReview?.id, REVIEW_ID);
 });
 
 test("custom workflow status ignores malformed envelope variants", () => {
@@ -486,7 +503,7 @@ test("native and malformed status events have no header or activity effect", () 
   assert.equal(issue.activity[0]?.id, valid.id);
   assert.deepEqual(
     issue.comments.map((comment) => comment.id).sort(),
-    malformed.map((event) => event.id).sort(),
+    malformed.slice(1).map((event) => event.id).sort(),
   );
 });
 
