@@ -99,6 +99,7 @@ import { UserProfilePanelFrame } from "@/features/profile/ui/UserProfilePanelFra
 import { getUserProfilePanelHeaderContent } from "@/features/profile/ui/UserProfilePanelHeaderContent";
 import { UserProfileEditAgentDialog } from "@/features/profile/ui/UserProfileEditAgentDialog";
 import { useProfileEditAgentRequest } from "@/features/profile/ui/useProfileEditAgentRequest";
+import { RolePromptStatus } from "@/features/profile/ui/RolePromptStatus";
 export type { ProfilePanelTab, ProfilePanelView };
 
 export function UserProfilePanel({
@@ -709,6 +710,11 @@ export function UserProfilePanel({
     managedAgent,
     resolvedPersona,
   );
+  const rolePromptRole = ["writer", "review", "host"].includes(
+    relayAgent?.agentType ?? "",
+  )
+    ? (relayAgent?.agentType as "writer" | "review" | "host")
+    : null;
   const canManagePersona = isOwner === true && resolvedPersona !== undefined;
   const cardMint = useCardMint(resolvedPersona, managedAgent);
   const canDeletePersona = canManagePersona && !resolvedPersona?.sourceTeam;
@@ -858,7 +864,14 @@ export function UserProfilePanel({
         <AgentInfoFocusedView metadataFields={agentInfoFields} />
       ) : null}
       {view === "configuration" ? (
-        <AgentConfigurationFocusedView fields={agentSettingsFields} />
+        <>
+          <AgentConfigurationFocusedView fields={agentSettingsFields} />
+          {relayAgent ? (
+            <div className="pt-4">
+              <RolePromptStatus owner={ownerPubkey} role={rolePromptRole} />
+            </div>
+          ) : null}
+        </>
       ) : null}
       {view === "instructions" ? (
         <AgentInstructionsFocusedView instruction={agentInstruction} />
